@@ -15,6 +15,28 @@ description: 通过 SSH 长连接排查远程服务器，适合需要多次执�
 
 本机需要 Python 3、`ssh` 和 `scp`。脚本只使用 Python 标准库；`scp` 负责传输文件。`jump` 模式使用密码登录时，本机还需要 `sshpass`，用于自动填写密码。
 
+### Windows：准备 `WSL` 环境
+
+以下命令在 `Windows` 终端（如 `PowerShell`）中执行。安装 `WSL` 属于系统级变更：会启用系统组件、下载发行版镜像并占用约 2 GB 磁盘空间。**必须先向用户说明这些影响并取得显式同意，才能安装**。执行前先用 `wsl -l -v` 检查，已有可用发行版时直接使用，不要重复安装。
+
+```bash
+# 安装 Ubuntu；--no-launch 跳过首次启动的交互式初始化，之后直接以 root 使用
+wsl --install -d Ubuntu --no-launch
+
+# 在 WSL 内安装依赖；python3 已随 Ubuntu 自带
+wsl -u root -- bash -c 'apt-get update && apt-get install -y openssh-client sshpass'
+```
+
+### Windows：调用脚本
+
+配置文件保存在 `WSL` 内的默认路径（`~/.config/ssh-mux/hosts.conf`），无需设置环境变量。所有子命令都通过 `wsl bash -c` 调用，技能目录在 `Windows` 侧时按 `/mnt/c/...` 规则映射：
+
+```bash
+wsl bash -c 'python3 /mnt/c/<技能目录>/ssh-persistent/ssh-mux.py exec db "hostname && uptime"'
+```
+
+`host add`、`push`、`status`、`exit` 等子命令替换引号内的命令即可。命令包在 `bash -c` 的引号里，是为了避免 `Git Bash` 自动改写 `/mnt/...` 开头的参数。长连接和守护进程运行在 `WSL` 内，空闲超时和断开行为与 Linux 一致。
+
 脚本根据目标主机的配置选择连接方式：
 
 | 模式 | 适用情况 | 连接方式 |
