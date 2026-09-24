@@ -6,7 +6,7 @@
 
 ## 安装与快速开始
 
-需要 Linux 或 `macOS`、Python 3，以及 `ssh`、`scp` 命令。脚本只使用 Python 标准库，无需安装 Python 依赖包。所有系统都可以通过 `ssh-mux.sh` 调用：`Windows` 的 `bash` 环境（`Git Bash` 等）会自动经 `WSL` 运行；`Windows` 没有 `bash` 时（`PowerShell`/`cmd`）改用 `ssh-mux.bat`，准备 `WSL` 的步骤见 [SKILL.md](SKILL.md)。
+需要 Linux 或 `macOS`、Python 3.7 或更新版本，以及 `ssh`、`scp` 命令。脚本只使用 Python 标准库，无需安装 Python 依赖包。所有系统都可以通过 `ssh-mux.sh` 调用：`Windows` 的 `bash` 环境（`Git Bash` 等）会自动经 `WSL` 运行；`Windows` 没有 `bash` 时（`PowerShell`/`cmd`）改用 `ssh-mux.bat`，准备 `WSL` 的步骤见 [SKILL.md](SKILL.md)。
 
 下面演示直接连接服务器。`jump` 模式使用密码登录时，本机还需要 `sshpass`，用于自动填写密码；使用密钥登录时，省略 `--password`。
 

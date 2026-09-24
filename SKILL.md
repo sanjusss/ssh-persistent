@@ -1,6 +1,6 @@
 ---
 name: ssh-persistent
-description: 通过 SSH 长连接排查远程服务器，适合需要多次执行命令或传输文件的任务。使用 `ssh-mux.py` 管理直连、标准跳板机和仅允许交互式登录的堡垒机。支持 Linux 和 `macOS`；`Windows` 需在 `WSL` 中运行。
+description: 通过 SSH 长连接排查远程服务器，适合需要多次执行命令或传输文件的任务。统一经 `ssh-mux.sh` 管理直连、标准跳板机和仅允许交互式登录的堡垒机（内部调用 `ssh-mux.py`）。支持 Linux 和 `macOS`；`Windows` 需在 `WSL` 中运行。
 ---
 
 # SSH 长连接管理
@@ -13,13 +13,13 @@ description: 通过 SSH 长连接排查远程服务器，适合需要多次执�
 
 本工具支持 Linux 和 `macOS`。原生 `Windows` 请在 `WSL`（`Windows` 的 Linux 子系统）中运行。脚本依赖 Unix 终端接口，`Windows` 版 `OpenSSH` 也不支持这里使用的连接复用功能。
 
-所有系统统一用 `ssh-mux.sh` 调用：Linux/macOS 直接使用本机 Python；`Windows` 的 `bash`（`Git Bash`、`MSYS2`、`Cygwin`）自动经 `WSL` 运行，并完成环境检查和本地路径转换。`Windows` 没有 `bash` 时（`PowerShell`/`cmd`），改用功能相同的 `ssh-mux.bat`。
+所有系统统一用 `ssh-mux.sh` 调用：Linux/`macOS` 直接使用本机 Python；`Windows` 的 `bash`（`Git Bash`、`MSYS2`、`Cygwin`）自动经 `WSL` 运行，并完成环境检查和本地路径转换。`Windows` 没有 `bash` 时（`PowerShell`/`cmd`），改用功能相同的 `ssh-mux.bat`。
 
-本机需要 Python 3、`ssh` 和 `scp`。脚本只使用 Python 标准库；`scp` 负责传输文件。`jump` 模式使用密码登录时，本机还需要 `sshpass`，用于自动填写密码。
+本机需要 Python 3.7 或更新版本，以及 `ssh` 和 `scp`。脚本只使用 Python 标准库；`scp` 负责传输文件。`jump` 模式使用密码登录时，本机还需要 `sshpass`，用于自动填写密码。
 
-### Windows：准备 `WSL` 环境
+### `Windows`：准备 `WSL` 环境
 
-以下命令在 `Windows` 终端（如 `PowerShell`）中执行。安装 `WSL` 属于系统级变更：会启用系统组件、下载发行版镜像并占用约 2 GB 磁盘空间。**必须先向用户说明这些影响并取得显式同意，才能安装**。执行前先用 `wsl -l -v` 检查，已有可用发行版时直接使用，不要重复安装。
+以下命令在 `Windows` 终端（如 `PowerShell`）中执行。安装 `WSL` 属于系统级变更：会启用系统组件、下载发行版镜像并占用约 2 `GB` 磁盘空间。**必须先向用户说明这些影响并取得显式同意，才能安装**。执行前先用 `wsl -l -v` 检查，已有可用发行版时直接使用，不要重复安装。
 
 ```bash
 # 安装 Ubuntu；--no-launch 跳过首次启动的交互式初始化，之后直接以 root 使用
@@ -29,7 +29,7 @@ wsl --install -d Ubuntu --no-launch
 wsl -u root -- bash -c 'apt-get update && apt-get install -y openssh-client sshpass'
 ```
 
-### Windows：调用方式
+### `Windows`：调用方式
 
 `Git Bash`、`MSYS2`、`Cygwin` 等 `bash` 环境下与其他系统一致，使用 `ssh-mux.sh`。它会自动检查 `WSL`、发行版和依赖，把本地文件路径映射为 `WSL` 路径（相对路径、`C:\...`、`/tmp/...` 形式均可），再经 `WSL` 运行：
 
@@ -44,7 +44,7 @@ wsl -u root -- bash -c 'apt-get update && apt-get install -y openssh-client sshp
 ssh-mux.bat exec db "hostname && uptime"
 ```
 
-远程路径原样传递；本地相对路径基于当前目录解析，当前目录在网络路径上时请改用绝对路径。配置文件保存在 `WSL` 内的默认路径（`~/.config/ssh-mux/hosts.conf`），无需设置环境变量。长连接和守护进程运行在 `WSL` 内，空闲超时和断开行为与 Linux 一致。
+远程路径原样传递；本地相对路径基于当前目录解析，当前目录在网络路径上时请改用绝对路径。配置文件保存在 `WSL` 内的默认路径（`~/.config/ssh-mux/hosts.conf`），无需设置环境变量。在 `Windows` 侧设置的环境变量（如 `SSH_MUX_CONFIG`）不会自动传入 `WSL`，需要经 `WSLENV`（`Windows` 与 `WSL` 之间转发环境变量的机制）转发后才生效；脚本在 `WSL` 内运行，一般无需设置这些变量。脚本所在目录以及 `push`/`pull` 的文件参数不支持 `//` 开头的网络共享路径（即 `Windows` 的 `UNC` 路径，形如 `\\服务器\共享名`，在 `WSL` 中显示为 `//服务器/共享名`）。使用这类路径时脚本会直接报错，请改用本地路径。长连接和守护进程运行在 `WSL` 内，空闲超时和断开行为与 Linux 一致。
 
 脚本根据目标主机的配置选择连接方式：
 
@@ -57,7 +57,7 @@ ssh-mux.bat exec db "hostname && uptime"
 
 ## 添加主机
 
-配置文件默认位于 `~/.config/ssh-mux/hosts.conf`，可通过环境变量 `SSH_MUX_CONFIG` 更改。优先使用 `host add` 和 `host remove` 管理主机，也可以手动编辑文件。
+配置文件默认位于 `~/.config/ssh-mux/hosts.conf`，可通过环境变量 `SSH_MUX_CONFIG` 更改（`Windows` 下需经 `WSLENV` 转发，见上文 `Windows` 小节）。优先使用 `host add` 和 `host remove` 管理主机，也可以手动编辑文件。
 
 下面的地址和登录信息都是示例。将 `S` 设为本技能目录中 `ssh-mux.sh` 的实际路径；`Windows` 没有 `bash` 时改用 `ssh-mux.bat`：
 
@@ -111,13 +111,13 @@ $S exit --all      # 断开所有主机的连接
 
 `exec` 返回远程命令的退出码和输出。`shell` 模式会去除终端回显（终端重复显示的输入内容）和颜色控制码。
 
-`exec` 的 `--session`、`--timeout` 选项可以放在别名或命令前后。`shell` 模式默认等待命令执行 `120` 秒，超时后发送 `Ctrl-C`，尝试恢复会话。需要等待更长时间时，增加 `--timeout`：
+`exec` 的 `--session`、`--timeout` 选项只能放在别名前后、命令开始之前；命令一旦开始，其后的内容全部按远程命令处理，不再解析为选项。`shell` 模式默认等待命令执行 `120` 秒，超时后发送 `Ctrl-C`，尝试恢复会话。`--timeout` 上限为 7200 秒，超过会被截断为 7200 秒。需要等待更长时间时，增加 `--timeout`：
 
 ```bash
 $S exec A --timeout 300 'some-command'
 ```
 
-当前 `jump` 模式不使用 `--session` 和 `--timeout`；这两个选项用于 `shell` 模式。
+当前 `jump` 模式不使用 `--session` 和 `--timeout`：`connect`、`exec`、`push`、`pull` 传入这两个选项都会被忽略。这两个选项用于 `shell` 模式。
 
 ### 多个任务使用独立会话
 
@@ -131,12 +131,16 @@ $S exit A --session case-1234          # 只断开助手甲的会话
 
 不指定 `--session` 时使用 `default` 会话。每个独立会话都需要从头完成登录，之后才可继续使用。堡垒机可能限制同一账号的同时在线会话数。
 
+传输文件同理：多个助手并行执行 `push` 或 `pull` 时，也要为各自的任务指定不同的 `--session`，与 `exec` 使用同一名称即可共用会话。
+
 ## 传输文件
 
 ```bash
 $S push A ./app.tar.gz /tmp/   # 上传文件
 $S pull B /var/log/app.log ./  # 下载文件
 ```
+
+`push` 和 `pull` 也支持 `--session` 和 `--timeout`，放置规则与 `exec` 相同。`--timeout` 默认为 3600 秒，指每两台主机之间传输文件的超时时间；超过 7200 秒时同样被截断为 7200 秒。
 
 `jump` 模式直接使用 `scp`，共用已建立的 SSH 连接。
 
@@ -202,3 +206,6 @@ $S host add local --staging relay
 | `SSH_MUX_CONFIG` | 配置文件路径 | `~/.config/ssh-mux/hosts.conf` |
 | `SSH_MUX_SOCKET_DIR` | 套接字及会话文件所在目录 | `/tmp` |
 | `SSH_MUX_PERSIST` | 空闲多久后自动断开，单位为秒 | `600` |
+| `SSH_MUX_DEBUG` | 设为非空值后，把 `pty` 收发的数据写入守护进程日志，用于排查登录问题 | 空（不启用） |
+
+这些变量由执行脚本时的环境读取。经 `WSL` 运行时（`Windows`），在 `Windows` 侧设置的变量不会自动传入 `WSL`，需要经 `WSLENV` 转发才生效。

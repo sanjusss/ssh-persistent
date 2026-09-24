@@ -8,3 +8,11 @@ __pycache__/
 # 运行期日志和错误文件
 *.log
 *.err
+
+# 套接字和进程号文件(默认在 /tmp,这里防御用户把 SSH_MUX_SOCKET_DIR 指向仓库目录)
+*.sock
+*.pid
+
+# 桌面系统生成的文件
+.DS_Store
+Thumbs.db

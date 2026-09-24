@@ -5,7 +5,22 @@
 # WSL 与依赖检查;push/pull 的本地路径参数转换为 WSL 路径,远程路径原样保留。
 # PowerShell/cmd 用户可直接运行 ssh-mux.bat,功能相同。
 
-DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# 经符号链接调用时逐级解析,找到脚本的真实所在目录
+SRC=$0
+while [ -h "$SRC" ]; do
+    DIR=$(CDPATH= cd -- "$(dirname -- "$SRC")" && pwd)
+    SRC=$(readlink "$SRC")
+    case $SRC in
+    /*) ;;
+    *) SRC=$DIR/$SRC ;;
+    esac
+done
+DIR=$(CDPATH= cd -- "$(dirname -- "$SRC")" && pwd)
+
+if [ ! -f "$DIR/ssh-mux.py" ]; then
+    echo "ssh-mux: 未找到 ssh-mux.py(应与 ssh-mux.sh 同目录:$DIR)" >&2
+    exit 1
+fi
 
 case "$(uname -s)" in
 MINGW*|MSYS*|CYGWIN*)
@@ -18,11 +33,16 @@ MINGW*|MSYS*|CYGWIN*)
         || die "WSL 中没有已安装的 Linux 发行版,需要先安装(步骤见 SKILL.md;安装前需征得用户同意)"
     if ! miss=$(wsl.exe -e bash -c \
         'for c in python3 ssh scp; do command -v $c >/dev/null || exit 1; done
-         command -v sshpass >/dev/null || echo no-sshpass' 2>/dev/null); then
+         command -v sshpass >/dev/null || echo SSHMUX-NO-SSHPASS' 2>/dev/null); then
         die "WSL 内缺少 python3/ssh/scp(或发行版没有 bash),请用 Ubuntu,或执行:wsl -u root -- apt-get install -y python3 openssh-client"
     fi
-    [ "$miss" = "no-sshpass" ] && echo "ssh-mux: 提示:WSL 内未安装 sshpass,密码登录会失败,仅密钥登录可忽略" \
-        "(安装:wsl -u root -- apt-get install -y sshpass)"
+    # bash 启动文件可能向 stdout 打印内容,标记带独特前缀并用通配判断,避免误判
+    case $miss in
+    *SSHMUX-NO-SSHPASS*)
+        echo "ssh-mux: 提示:WSL 内未安装 sshpass,密码登录会失败,仅密钥登录可忽略" \
+            "(安装:wsl -u root -- apt-get install -y sshpass)"
+        ;;
+    esac
     wsl.exe -e python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)' 2>/dev/null \
         || die "WSL 内 Python 版本低于 3.7,请升级后再使用"
 
@@ -34,7 +54,12 @@ MINGW*|MSYS*|CYGWIN*)
         _r=$(printf '%s' "$_r" | tr '\\' '/')
         printf '/mnt/%s%s' "$_d" "$_r"
     }
-    WSLPY=$(to_wsl "$(cygpath -w "$DIR/ssh-mux.py")")
+    PYWIN=$(cygpath -w "$DIR/ssh-mux.py")
+    # 仓库在 UNC 网络路径上时 cygpath 给出 \\server\share 形状,to_wsl 无法转换
+    case $PYWIN in
+    \\\\*|//*) die "仓库位于网络路径($PYWIN),WSL 无法访问,请把仓库放到本地磁盘" ;;
+    esac
+    WSLPY=$(to_wsl "$PYWIN")
 
     if [ "$1" = "push" ] || [ "$1" = "pull" ]; then
         # push <别名> [选项] <本地路径> <远程路径>;pull 的两个路径顺序相反。
@@ -55,6 +80,7 @@ MINGW*|MSYS*|CYGWIN*)
                 case "$arg" in
                 --) nopt=1; set -- "$@" "$arg"; continue ;;
                 --session|--timeout)
+                    # 带值选项清单需与 ssh-mux.py push/pull 的 argparse 带值选项保持同步
                     if [ "$seen" -ge "$total" ]; then
                         die "$arg 需要一个参数值"
                     fi
@@ -73,7 +99,10 @@ MINGW*|MSYS*|CYGWIN*)
             pathpos=$((pathpos + 1))
             if [ "$pathpos" -eq "$loc" ]; then
                 case "$arg" in /*) arg=$(cygpath -w "$arg") ;; esac
-                case "$arg" in [a-zA-Z]:*) arg=$(to_wsl "$arg") ;; esac
+                case $arg in
+                \\\\*|//*) die "不支持网络路径($arg),请先把文件放到本地磁盘再传输" ;;
+                [a-zA-Z]:*) arg=$(to_wsl "$arg") ;;
+                esac
             fi
             set -- "$@" "$arg"
         done

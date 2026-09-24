@@ -26,6 +26,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
+wsl.exe -e python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)" >nul 2>&1
+if errorlevel 1 (
+    echo ssh-mux: Python inside WSL is older than 3.7, please upgrade it first.
+    exit /b 1
+)
+
 wsl.exe -e bash -c "command -v sshpass >/dev/null" >nul 2>&1
 if errorlevel 1 (
     echo ssh-mux: note: sshpass not found in WSL, password login will fail. Install:
@@ -33,6 +39,10 @@ if errorlevel 1 (
 )
 
 set "WSLPY="
+if not exist "%~dp0ssh-mux.py" (
+    echo ssh-mux: ssh-mux.py not found next to this script ^(%~dp0^)
+    exit /b 1
+)
 for /f "usebackq delims=" %%p in (`wsl.exe -e wslpath -a "%~dp0ssh-mux.py" 2^>nul`) do set "WSLPY=%%p"
 if not defined WSLPY (
     echo ssh-mux: cannot map %~dp0ssh-mux.py to a WSL path
@@ -44,8 +54,10 @@ rem rebuild loop would mangle arguments containing %% (double expansion).
 rem Only push/pull need path mapping: their local file argument is written
 rem as a drive-letter path. Mapping by shape (second char is ":") is safe
 rem here because push/pull take no other drive-letter-looking values.
-if /I "%~1"=="push" goto rebuild
-if /I "%~1"=="pull" goto rebuild
+rem Case-sensitive on purpose: ssh-mux.py's argparse only accepts lowercase
+rem push/pull, so accepting PUSH here would just fail later with invalid choice.
+if "%~1"=="push" goto rebuild
+if "%~1"=="pull" goto rebuild
 wsl.exe -e python3 "%WSLPY%" %*
 exit /b %errorlevel%
 
@@ -68,7 +80,9 @@ rem its command line; it adds nothing for scp, so strip it first.
 if "%CUR:~-1%"=="\" (set "CUR=%CUR:~0,-1%" & goto strip)
 set "C2=%CUR:~1,1%"
 if not "%C2%"==":" goto append
-set "ORIG=%~1"
+rem Compare against the stripped value: ORIG must match what wslpath was
+rem given, otherwise a stripped trailing backslash would hide a failed mapping.
+set "ORIG=%CUR%"
 for /f "usebackq delims=" %%w in (`wsl.exe -e wslpath -a "%CUR%" 2^>nul`) do set "CUR=%%w"
 if "%CUR%"=="%ORIG%" echo ssh-mux: warning: cannot map "%ORIG%" to a WSL path, passing it unchanged
 :append
