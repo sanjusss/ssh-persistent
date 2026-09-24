@@ -1,6 +1,6 @@
 ---
 name: ssh-persistent
-description: 通过 SSH 长连接远程排查服务器。支持直连/标准跳板(`ControlMaster` 多路复用)和堡垒机(仅交互终端)两种场景,用 `ssh-mux.py` 统一管理连接、命令执行和文件传输。当需要对远程服务器执行多次 SSH 命令时使用。仅支持 Linux/macOS,Windows 请在 WSL 中使用。
+description: 通过 SSH 长连接远程排查服务器。支持直连/标准跳板(`ControlMaster` 多路复用)和堡垒机(仅交互终端)两种场景,用 `ssh-mux.py` 统一管理连接、命令执行和文件传输。当需要对远程服务器执行多次 SSH 命令时使用。仅支持 Linux/`macOS`,`Windows` 请在 `WSL` 中使用。
 ---
 
 # SSH 持久连接(ssh-persistent)
@@ -18,7 +18,7 @@ description: 通过 SSH 长连接远程排查服务器。支持直连/标准跳�
 
 使用:对同一台服务器执行 2 次以上命令;远程排查、巡检、日志收集;需要经堡垒机或跳板机访问内网主机;需要在主机间传文件。
 
-不使用:只执行单次命令;目标主机完全无法通过 SSH 到达;运行环境是原生 Windows(本工具依赖 Unix 的 `pty`、`fcntl` 等接口,只支持 Linux/macOS,Windows 上请在 WSL 里使用)。
+不使用:只执行单次命令;目标主机完全无法通过 SSH 到达;运行环境是原生 `Windows`(本工具依赖 Unix 的 `pty`、`fcntl` 等接口,只支持 Linux/`macOS`,`Windows` 上请在 `WSL` 里使用)。
 
 ## 文件组成
 
