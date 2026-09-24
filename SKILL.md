@@ -5,13 +5,15 @@ description: 通过 SSH 长连接排查远程服务器，适合需要多次执�
 
 # SSH 长连接管理
 
-使用本目录中的 `ssh-mux.py` 连接服务器、执行命令和传输文件。主机地址、端口及登录信息保存在配置文件中，执行命令时引用主机别名。首次登录后，后续操作继续使用已有连接。
+通过同目录的 `ssh-mux.sh` 连接服务器、执行命令和传输文件（内部调用 `ssh-mux.py`；`Windows` 没有 `bash` 时改用 `ssh-mux.bat`）。主机地址、端口及登录信息保存在配置文件中，执行命令时引用主机别名。首次登录后，后续操作继续使用已有连接。
 
 适用于远程排查、巡检、日志收集，以及通过跳板机或堡垒机访问内网主机。只执行一次命令时，无需使用本工具。目标主机必须能通过 SSH 访问。
 
 ## 运行环境与连接方式
 
 本工具支持 Linux 和 `macOS`。原生 `Windows` 请在 `WSL`（`Windows` 的 Linux 子系统）中运行。脚本依赖 Unix 终端接口，`Windows` 版 `OpenSSH` 也不支持这里使用的连接复用功能。
+
+所有系统统一用 `ssh-mux.sh` 调用：Linux/macOS 直接使用本机 Python；`Windows` 的 `bash`（`Git Bash`、`MSYS2`、`Cygwin`）自动经 `WSL` 运行，并完成环境检查和本地路径转换。`Windows` 没有 `bash` 时（`PowerShell`/`cmd`），改用功能相同的 `ssh-mux.bat`。
 
 本机需要 Python 3、`ssh` 和 `scp`。脚本只使用 Python 标准库；`scp` 负责传输文件。`jump` 模式使用密码登录时，本机还需要 `sshpass`，用于自动填写密码。
 
@@ -27,15 +29,22 @@ wsl --install -d Ubuntu --no-launch
 wsl -u root -- bash -c 'apt-get update && apt-get install -y openssh-client sshpass'
 ```
 
-### Windows：调用脚本
+### Windows：调用方式
 
-配置文件保存在 `WSL` 内的默认路径（`~/.config/ssh-mux/hosts.conf`），无需设置环境变量。所有子命令都通过 `wsl bash -c` 调用，技能目录在 `Windows` 侧时按 `/mnt/c/...` 规则映射：
+`Git Bash`、`MSYS2`、`Cygwin` 等 `bash` 环境下与其他系统一致，使用 `ssh-mux.sh`。它会自动检查 `WSL`、发行版和依赖，把本地文件路径映射为 `WSL` 路径（相对路径、`C:\...`、`/tmp/...` 形式均可），再经 `WSL` 运行：
 
 ```bash
-wsl bash -c 'python3 /mnt/c/<技能目录>/ssh-persistent/ssh-mux.py exec db "hostname && uptime"'
+./ssh-mux.sh exec db "hostname && uptime"
+./ssh-mux.sh push db ./app.tar.gz /tmp/
 ```
 
-`host add`、`push`、`status`、`exit` 等子命令替换引号内的命令即可。命令包在 `bash -c` 的引号里，是为了避免 `Git Bash` 自动改写 `/mnt/...` 开头的参数。长连接和守护进程运行在 `WSL` 内，空闲超时和断开行为与 Linux 一致。
+没有 `bash` 时（`PowerShell`/`cmd`），直接运行功能相同的 `ssh-mux.bat`：
+
+```bat
+ssh-mux.bat exec db "hostname && uptime"
+```
+
+远程路径原样传递；本地相对路径基于当前目录解析，当前目录在网络路径上时请改用绝对路径。配置文件保存在 `WSL` 内的默认路径（`~/.config/ssh-mux/hosts.conf`），无需设置环境变量。长连接和守护进程运行在 `WSL` 内，空闲超时和断开行为与 Linux 一致。
 
 脚本根据目标主机的配置选择连接方式：
 
@@ -50,31 +59,31 @@ wsl bash -c 'python3 /mnt/c/<技能目录>/ssh-persistent/ssh-mux.py exec db "ho
 
 配置文件默认位于 `~/.config/ssh-mux/hosts.conf`，可通过环境变量 `SSH_MUX_CONFIG` 更改。优先使用 `host add` 和 `host remove` 管理主机，也可以手动编辑文件。
 
-下面的地址和登录信息都是示例。将 `S` 设为本技能目录中脚本的实际路径：
+下面的地址和登录信息都是示例。将 `S` 设为本技能目录中 `ssh-mux.sh` 的实际路径；`Windows` 没有 `bash` 时改用 `ssh-mux.bat`：
 
 ```bash
-S=/path/to/ssh-persistent/ssh-mux.py
+S=/path/to/ssh-persistent/ssh-mux.sh
 
 # 直接连接，db 是主机别名
-python3 $S host add db --host 7.7.7.7 --user root --password 'xxx'
+$S host add db --host 7.7.7.7 --user root --password 'xxx'
 
 # 标准跳板机：先添加 jump，再添加通过 jump 访问的 web
-python3 $S host add jump --host 5.5.5.5 --port 2222 --user jump --password 'xxx'
-python3 $S host add web --host 6.6.6.6 --user root --password 'xxx' \
+$S host add jump --host 5.5.5.5 --port 2222 --user jump --password 'xxx'
+$S host add web --host 6.6.6.6 --user root --password 'xxx' \
         --via jump --via-mode jump
 
 # 堡垒机：通过登录名指定目标 IP
-python3 $S host add bastion --host 2.2.2.2 --user T123456 \
+$S host add bastion --host 2.2.2.2 --user T123456 \
         --password 'xxx' --routing username
-python3 $S host add A --host 3.3.3.3 --user root --password 'xxx' \
+$S host add A --host 3.3.3.3 --user root --password 'xxx' \
         --via bastion --via-mode shell
 
 # 从 A 继续登录 B
-python3 $S host add B --host 4.4.4.4 --user root --password 'xxx' \
+$S host add B --host 4.4.4.4 --user root --password 'xxx' \
         --via A --via-mode shell
 
-python3 $S list
-python3 $S host remove B
+$S list
+$S host remove B
 ```
 
 `host add` 只保存配置，不连接主机。别名已存在时，需要先删除再添加。如果其他主机的 `via` 引用了某个别名，脚本会拒绝删除该别名。删除配置不会断开已经建立的会话。
@@ -92,12 +101,12 @@ python3 $S host remove B
 ## 执行命令
 
 ```bash
-python3 $S connect A                  # 提前连接；已连接时跳过
-python3 $S exec A 'uptime'            # 未连接时自动登录
-python3 $S exec A 'ps aux --sort=-%cpu | head -20'
-python3 $S status                     # 查看连接状态
-python3 $S exit A                     # 断开 A 的连接；shell 模式下断开 A 的所有会话
-python3 $S exit --all                 # 断开所有主机的连接
+$S connect A      # 提前连接；已连接时跳过
+$S exec A 'uptime' # 未连接时自动登录
+$S exec A 'ps aux --sort=-%cpu | head -20'
+$S status          # 查看连接状态
+$S exit A          # 断开 A 的连接；shell 模式下断开 A 的所有会话
+$S exit --all      # 断开所有主机的连接
 ```
 
 `exec` 返回远程命令的退出码和输出。`shell` 模式会去除终端回显（终端重复显示的输入内容）和颜色控制码。
@@ -105,7 +114,7 @@ python3 $S exit --all                 # 断开所有主机的连接
 `exec` 的 `--session`、`--timeout` 选项可以放在别名或命令前后。`shell` 模式默认等待命令执行 `120` 秒，超时后发送 `Ctrl-C`，尝试恢复会话。需要等待更长时间时，增加 `--timeout`：
 
 ```bash
-python3 $S exec A --timeout 300 'some-command'
+$S exec A --timeout 300 'some-command'
 ```
 
 当前 `jump` 模式不使用 `--session` 和 `--timeout`；这两个选项用于 `shell` 模式。
@@ -115,9 +124,9 @@ python3 $S exec A --timeout 300 'some-command'
 `shell` 模式会保留当前目录、环境变量等状态。同一个人工智能助手执行同一任务时，可以共用会话。多个助手并行工作时，必须为各自的任务指定不同的 `--session`，避免相互影响。
 
 ```bash
-python3 $S exec A --session case-1234 'uptime'  # 助手甲
-python3 $S exec A --session case-5678 'df -h'   # 助手乙
-python3 $S exit A --session case-1234          # 只断开助手甲的会话
+$S exec A --session case-1234 'uptime'  # 助手甲
+$S exec A --session case-5678 'df -h'   # 助手乙
+$S exit A --session case-1234          # 只断开助手甲的会话
 ```
 
 不指定 `--session` 时使用 `default` 会话。每个独立会话都需要从头完成登录，之后才可继续使用。堡垒机可能限制同一账号的同时在线会话数。
@@ -125,8 +134,8 @@ python3 $S exit A --session case-1234          # 只断开助手甲的会话
 ## 传输文件
 
 ```bash
-python3 $S push A ./app.tar.gz /tmp/   # 上传文件
-python3 $S pull B /var/log/app.log ./  # 下载文件
+$S push A ./app.tar.gz /tmp/   # 上传文件
+$S pull B /var/log/app.log ./  # 下载文件
 ```
 
 `jump` 模式直接使用 `scp`，共用已建立的 SSH 连接。
@@ -138,7 +147,7 @@ python3 $S pull B /var/log/app.log ./  # 下载文件
 本机运行 `sshd`（接收 SSH 登录的服务）时，在 `[local]` 中填写本机地址和登录信息：
 
 ```bash
-python3 $S host add local --host 1.1.1.1 --user myuser --password 'xxx'
+$S host add local --host 1.1.1.1 --user myuser --password 'xxx'
 ```
 
 地址必须能被中转主机访问，不能填写 `127.0.0.1`。中转主机通过 `scp` 从本机读取文件，或把文件写回本机。这种传输方式需要配置本机的登录密码。
@@ -148,8 +157,8 @@ python3 $S host add local --host 1.1.1.1 --user myuser --password 'xxx'
 用 `staging` 指定一台暂存主机。本机和连接路径上的第一台中转主机都必须能通过 SSH 登录这台服务器。
 
 ```bash
-python3 $S host add relay --host 5.5.5.5 --user root --password 'xxx'
-python3 $S host add local --staging relay
+$S host add relay --host 5.5.5.5 --user root --password 'xxx'
+$S host add local --staging relay
 ```
 
 上传时，本机先上传到暂存主机，中转主机再从那里取文件。下载时，中转主机先上传到暂存主机，本机再下载。
@@ -157,6 +166,8 @@ python3 $S host add local --staging relay
 暂存主机必须使用 `jump` 模式，可以经过标准跳板机访问，并且必须配置 `password`。使用 `staging` 后，`[local]` 的 `host`、`user`、`password` 可以省略。如果已有 `[local]`，先删除再按所选方式添加。
 
 每次在中转主机上复制文件时，脚本优先使用那台主机上的 `sshpass` 填写密码。没有 `sshpass` 时，脚本会尝试识别密码提示并应答。如果输出中恰好出现 `password:`，可能被误认为密码提示。
+
+注意：使用 `sshpass` 时，下一跳主机的密码会以命令行参数形式出现在中转主机上，该机上的其他用户可以通过 `ps` 看到，并会记入中转账号的 shell 历史。相邻两跳使用不同密码时，请评估这个暴露面是否可接受。
 
 ## 使用限制与断线处理
 
