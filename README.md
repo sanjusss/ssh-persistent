@@ -19,6 +19,7 @@ SSH 长连接管理工具:一次登录,后续命令和文件传输全部复用�
 
 ## 运行环境
 
+- 平台:Linux 或 macOS。原生 Windows 不支持(依赖 Unix 的 `pty`、`fcntl` 等接口,且 Win32-OpenSSH 不支持连接多路复用),Windows 请使用 WSL
 - python3(只用标准库)
 - 本机有 `ssh`、`scp`;密码认证需要 `sshpass`
 - 文件传输建议中转主机也装 `sshpass`(没有会自动回退到交互式应答)
