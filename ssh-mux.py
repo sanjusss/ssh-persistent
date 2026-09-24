@@ -197,7 +197,9 @@ class PtySession:
             self.log("pty>> " + repr(data[-2000:]))
         self.buf += data
         if len(self.buf) > 2_000_000:
-            self.buf = self.buf[-1_000_000:]
+            # 标注必须保留:调用方只能看到末尾,不标注会误以为输出完整
+            note = "[ssh-mux: 输出超过 2MB,前面部分已丢弃,仅保留末尾]\n"
+            self.buf = b"\n" + note.encode() + b"\n" + self.buf[-1_000_000:]
 
     def _wait_for(self, rx, timeout, extra=()):
         """等待 `rx` 匹配输出末尾;`extra` 里的提示见到就自动应答"""
@@ -597,18 +599,19 @@ def jump_sock_file(h):
 
 def jump_check(h):
     return subprocess.run(
-        ["ssh", "-o", f"ControlPath={JUMP_CPATH}", "-O", "check", f"{h.user}@{h.host}"],
+        ["ssh", "-o", f"ControlPath={JUMP_CPATH}", "-p", str(h.port),
+         "-O", "check", f"{h.user}@{h.host}"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
 def jump_connect(cp, h, quiet=False):
-    jump_spec = None
+    via_cpath = None
     if h.via:
         via = get_host(cp, h.via)
         if via.routing or host_mode(via) == "shell":
             die(f"[{via.alias}] 是堡垒机(仅交互终端),[{h.alias}] 不能用 `via_mode=jump`")
         jump_connect(cp, via, quiet=True)
-        jump_spec = f"{via.user}@{via.host}:{via.port}"
+        via_cpath = jump_sock_file(via)
     if jump_check(h):
         if not quiet:
             print(f"已连接: {h.alias} ({h.addr()})")
@@ -621,8 +624,18 @@ def jump_connect(cp, h, quiet=False):
            "-o", "ControlMaster=yes", "-o", f"ControlPath={JUMP_CPATH}",
            "-o", f"ControlPersist={PERSIST}", "-o", "ConnectTimeout=10",
            "-p", str(h.port)]
-    if jump_spec:
-        cmd += ["-J", jump_spec]
+    if via_cpath:
+        # 不用 `-J`:ProxyJump 的内层 ssh 不继承命令行的 -o 选项,会绕开
+        # 跳板机的 ControlMaster 重新认证,密码登录时必然失败。这里让内层
+        # ssh 显式复用跳板机的 master 套接字,内层不再需要认证。
+        # 内层先用当前 Python 执行 setsid 再 exec:认证完成后 sshpass 退出、
+        # 其终端销毁,未脱离终端的代理子进程会随终端一起被杀(实测 setsid
+        # 可避免;macOS 没有 setsid 命令,故借 Python 完成)。
+        cmd += ["-o",
+                f"ProxyCommand={shlex.quote(sys.executable)} -c "
+                f"'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "
+                f"ssh -o ControlPath={shlex.quote(via_cpath)} "
+                f"-W %h:%p {shlex.quote(f'{via.user}@{via.host}')}"]
     cmd += ["-fN", f"{h.user}@{h.host}"]
     env = dict(os.environ)
     if h.password:
@@ -655,7 +668,8 @@ def jump_scp(cp, h, direction, src, dst):
 def jump_exit(h):
     if not os.path.exists(jump_sock_file(h)):
         return False
-    subprocess.run(["ssh", "-o", f"ControlPath={JUMP_CPATH}", "-O", "exit", f"{h.user}@{h.host}"],
+    subprocess.run(["ssh", "-o", f"ControlPath={JUMP_CPATH}", "-p", str(h.port),
+                    "-O", "exit", f"{h.user}@{h.host}"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         os.unlink(jump_sock_file(h))
@@ -770,6 +784,9 @@ def shell_pull(cp, target, session, remote_path, local_path, timeout):
     """下载文件：从目标主机开始，按登录路径的相反顺序逐台复制到本机。
     配置了 `staging` 时，中转主机先上传到暂存主机，本机再从那里下载。
     """
+    # 相对路径在本机解析;不转绝对路径的话,末段 scp 在中转主机上执行,
+    # 会把相对路径解析到 [local] 账号在 sshd 上的家目录
+    local_path = os.path.abspath(local_path)
     staging, local = xfer_endpoint(cp)
     hops = shell_hops(build_chain(cp, target.alias))
     tmp = f"/tmp/.ssh_mux_xfer_{rand_token()}"
