@@ -40,6 +40,7 @@ python3 $S host add A --host 3.3.3.3 --user root --password 'xxx' \
 python3 $S host add web --host 6.6.6.6 --user root --password 'xxx' \
         --via jump --via-mode jump                                           # 经标准跳板(-J)
 python3 $S host add local --host 1.1.1.1 --user myuser --password 'xxx' # [local] 保留段
+python3 $S host add local --staging jump    # 本机没开 `sshd` 时改这样:传输经暂存主机 `jump` 换手
 python3 $S host remove A                                                     # 删除(被 `via` 引用时拒绝)
 ```
 
@@ -50,6 +51,7 @@ python3 $S host remove A                                                     # �
 host=1.1.1.1
 user=myuser
 password=mypass
+# staging=jump             # 本机没开 `sshd` 时改配这项:传输经暂存主机换手,上面三个字段可省
 
 [bastion]                  # 用户名路由型堡垒机
 host=2.2.2.2
@@ -79,7 +81,9 @@ via=jump
 via_mode=jump
 ```
 
-字段:`host`(必填)、`port`(默认 22)、`user`(默认当前用户)、`password`(不配走密钥)、`via`(跳板别名)、`via_mode`(`jump` 标准跳板,默认;`shell` 堡垒机)、`routing=username`(用户名路由型堡垒机,只标在堡垒机自己身上)。密码明文保存,等号后内容原样读取,特殊字符不用转义。
+字段:`host`(必填)、`port`(默认 22)、`user`(默认当前用户)、`password`(不配走密钥)、`via`(跳板别名)、`via_mode`(`jump` 标准跳板,默认;`shell` 堡垒机)、`routing=username`(用户名路由型堡垒机,只标在堡垒机自己身上)、`staging`(只用于 `[local]` 段,见下)。密码明文保存,等号后内容原样读取,特殊字符不用转义。
+
+`[local]` 段有两种配法:本机开了 `sshd` 时配 `host`/`user`/`password`,中转机直接 `scp` 回本机;本机没开 `sshd` 时配 `staging=<别名>`,指向一台本机和链路最外层中转机都能 ssh 到的暂存主机,文件经它换手。暂存主机必须是 `jump` 模式可直连的主机(可以有 `jump` 跳板链),且要配 `password`。
 
 ## 命令用法
 
@@ -100,7 +104,7 @@ python3 $S exit A                       # 断开;exit --all 全部断开
 
 `exec` 的退出码就是远程命令的退出码,输出是远程命令的输出(已剥掉终端回显和颜色码)。`--session` 和 `--timeout` 可以放在别名前后任意位置(默认 120 秒,超时自动发 `Ctrl-C` 并恢复会话)。
 
-文件传输说明:`shell` 模式下本机与目标之间没有直接通道,`push`/`pull` 在中转主机上用 `scp` 逐棒接力(本机→`A`→`B` 或反向),依赖配置里 `[local]` 段的地址和凭据;`jump` 模式直接走 `scp` 复用长连接。
+文件传输说明:`shell` 模式下本机与目标之间没有直接通道,`push`/`pull` 在中转主机上用 `scp` 逐棒接力(本机→`A`→`B` 或反向),依赖配置里 `[local]` 段。本机没开 `sshd` 时,按上文的 `staging` 配法走暂存主机换手。`jump` 模式直接走 `scp` 复用长连接。
 
 ## 多 `agent` 并发
 

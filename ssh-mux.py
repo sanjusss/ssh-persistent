@@ -690,27 +690,68 @@ def xfer_leg(hop, session, command, password, timeout):
         die(f"传输失败(在 {hop.alias} 上执行),退出码 {r['exit']}: {r['output'][-300:]}")
 
 
-def shell_push(cp, target, session, local_path, remote_path, timeout):
-    """上传:本机 -> 最外层中转 -> 逐跳 -> 目标,全部在中转主机的会话里编排"""
+def get_staging(cp):
+    """解析 [local] 段的 `staging` 字段:本机没开 `sshd` 时,文件传输经这台
+    暂存主机换手(本机和链路最外层中转机都要能 ssh 到它)。返回 `Host` 或 `None`"""
+    if not cp.has_section("local"):
+        return None
+    alias = cp["local"].get("staging", "").strip()
+    if not alias:
+        return None
+    if alias == "local":
+        die("[local] 的 `staging` 不能指向 `local` 自己")
+    h = get_host(cp, alias)
+    if host_mode(h) != "jump":
+        die(f"暂存主机 [{alias}] 必须能用 `jump` 模式直连,堡垒机链路上的主机不行")
+    if not h.password:
+        die(f"暂存主机 [{alias}] 需要配置 `password`(中转机应答密码用)")
+    return h
+
+
+def xfer_endpoint(cp):
+    """确定文件传输的本机侧终点:配了 `staging` 走暂存主机,否则中转机
+    直接 `scp` 回本机。返回 (暂存主机或 `None`, [local] 主机或 `None`)"""
+    staging = get_staging(cp)
+    if staging is not None:
+        return staging, None
     local = get_host(cp, "local")
     if not local.password:
-        die("文件传输需要 [local] 段配置 `host`/`user`/`password`")
+        die("文件传输需要 [local] 段配置 `host`/`user`/`password`,"
+            "本机没开 `sshd` 时改用 `staging` 指定暂存主机")
+    return None, local
+
+
+def shell_push(cp, target, session, local_path, remote_path, timeout):
+    """上传:本机 -> 最外层中转 -> 逐跳 -> 目标,逐跳部分在中转主机的会话里
+    编排。配了 `staging` 时本机先把文件推到暂存主机,中转机再从那里拉"""
+    staging, local = xfer_endpoint(cp)
     src = os.path.abspath(local_path)
     if not os.path.exists(src):
         die(f"本地路径不存在: {src}")
     hops = shell_hops(build_chain(cp, target.alias))
     tmp = f"/tmp/.ssh_mux_xfer_{rand_token()}"
-    first_dst = tmp if len(hops) > 1 else remote_path
-    xfer_leg(hops[0], session,
-             f"scp -q -o StrictHostKeyChecking=no -P {local.port} "
-             f"{scp_spec(local, src)} {shlex.quote(first_dst)}",
-             local.password, timeout)
-    for i in range(len(hops) - 1):
-        dst = remote_path if i == len(hops) - 2 else tmp
-        xfer_leg(hops[i], session,
-                 f"scp -q -o StrictHostKeyChecking=no -P {hops[i + 1].port} "
-                 f"{shlex.quote(tmp)} {scp_spec(hops[i + 1], dst)}",
-                 hops[i + 1].password, timeout)
+    stage_tmp = f"/tmp/.ssh_mux_xfer_{rand_token()}" if staging else None
+    try:
+        if staging:
+            if jump_scp(cp, staging, "push", src, stage_tmp) != 0:
+                die(f"传输失败(本机 -> 暂存主机 {staging.alias})")
+            endpoint, epath, epw = staging, stage_tmp, staging.password
+        else:
+            endpoint, epath, epw = local, src, local.password
+        first_dst = tmp if len(hops) > 1 else remote_path
+        xfer_leg(hops[0], session,
+                 f"scp -q -o StrictHostKeyChecking=no -P {endpoint.port} "
+                 f"{scp_spec(endpoint, epath)} {shlex.quote(first_dst)}",
+                 epw, timeout)
+        for i in range(len(hops) - 1):
+            dst = remote_path if i == len(hops) - 2 else tmp
+            xfer_leg(hops[i], session,
+                     f"scp -q -o StrictHostKeyChecking=no -P {hops[i + 1].port} "
+                     f"{shlex.quote(tmp)} {scp_spec(hops[i + 1], dst)}",
+                     hops[i + 1].password, timeout)
+    finally:
+        if stage_tmp:
+            jump_exec(cp, staging, f"rm -f {shlex.quote(stage_tmp)}")
     if len(hops) > 1:
         for h in hops[:-1]:
             shell_exec(h.alias, session, f"rm -f {shlex.quote(tmp)}", 30)
@@ -718,10 +759,9 @@ def shell_push(cp, target, session, local_path, remote_path, timeout):
 
 
 def shell_pull(cp, target, session, remote_path, local_path, timeout):
-    """下载:目标 -> 逐跳 -> 最外层中转 -> 本机"""
-    local = get_host(cp, "local")
-    if not local.password:
-        die("文件传输需要 [local] 段配置 `host`/`user`/`password`")
+    """下载:目标 -> 逐跳 -> 最外层中转 -> 本机。
+    配了 `staging` 时中转机把文件推到暂存主机,本机再从那里拉回来"""
+    staging, local = xfer_endpoint(cp)
     hops = shell_hops(build_chain(cp, target.alias))
     tmp = f"/tmp/.ssh_mux_xfer_{rand_token()}"
     n = len(hops)
@@ -732,10 +772,23 @@ def shell_pull(cp, target, session, remote_path, local_path, timeout):
                  f"{scp_spec(hops[i], src)} {shlex.quote(tmp)}",
                  hops[i].password, timeout)
     src = tmp if n > 1 else remote_path
-    xfer_leg(hops[0], session,
-             f"scp -q -o StrictHostKeyChecking=no -P {local.port} "
-             f"{shlex.quote(src)} {scp_spec(local, local_path)}",
-             local.password, timeout)
+    stage_tmp = f"/tmp/.ssh_mux_xfer_{rand_token()}" if staging else None
+    try:
+        if staging:
+            xfer_leg(hops[0], session,
+                     f"scp -q -o StrictHostKeyChecking=no -P {staging.port} "
+                     f"{shlex.quote(src)} {scp_spec(staging, stage_tmp)}",
+                     staging.password, timeout)
+            if jump_scp(cp, staging, "pull", stage_tmp, local_path) != 0:
+                die(f"传输失败(暂存主机 {staging.alias} -> 本机)")
+        else:
+            xfer_leg(hops[0], session,
+                     f"scp -q -o StrictHostKeyChecking=no -P {local.port} "
+                     f"{shlex.quote(src)} {scp_spec(local, local_path)}",
+                     local.password, timeout)
+    finally:
+        if stage_tmp:
+            jump_exec(cp, staging, f"rm -f {shlex.quote(stage_tmp)}")
     if n > 1:
         for h in hops[:-1]:
             shell_exec(h.alias, session, f"rm -f {shlex.quote(tmp)}", 30)
@@ -808,12 +861,22 @@ def cmd_host_add(args):
     cp = load_config_for_edit()
     if cp.has_section(alias):
         die(f"[{alias}] 已存在,先 `host remove {alias}` 再添加")
+    if args.staging:
+        if alias != "local":
+            die("`--staging` 只能用于 `local` 段")
+        if not cp.has_section(args.staging):
+            die(f"`staging` 指向的 [{args.staging}] 不存在")
+    if not args.host and not args.staging:
+        die("`--host` 必填(仅 `local` 段配了 `--staging` 时可省)")
     if args.via and not cp.has_section(args.via):
         known = ", ".join(cp.sections()) or "(空)"
         die(f"`via` 指向的 [{args.via}] 不存在,现有: {known}")
     cp.add_section(alias)
     sec = cp[alias]
-    sec["host"] = args.host
+    if args.host:
+        sec["host"] = args.host
+    if args.staging:
+        sec["staging"] = args.staging
     if args.port:
         sec["port"] = str(args.port)
     if args.user:
@@ -963,7 +1026,8 @@ def main():
     hsub = hp.add_subparsers(dest="host_cmd", required=True)
     p = hsub.add_parser("add", help="添加主机(只写配置,不建连)")
     p.add_argument("alias", help="主机别名;`local` 是文件中转用的保留段")
-    p.add_argument("--host", required=True, help="主机地址(IP 或域名)")
+    p.add_argument("--host", default=None,
+                   help="主机地址(IP 或域名);`local` 段配了 `--staging` 时可省")
     p.add_argument("--port", type=int, default=None, help="SSH 端口(默认 22)")
     p.add_argument("--user", default=None, help="登录用户名(默认当前本机用户)")
     p.add_argument("--password", default=None, help="登录密码,明文保存;不配则走密钥认证")
@@ -972,6 +1036,8 @@ def main():
                    help="配合 --via:jump=标准 SSH 跳板(默认),shell=堡垒机")
     p.add_argument("--routing", choices=["username"], default=None,
                    help="username=用户名路由型堡垒机(登录名自动拼 <user>/<目标IP>/any)")
+    p.add_argument("--staging", default=None,
+                   help="仅 `local` 段可用:文件传输经这台暂存主机换手(本机没开 `sshd` 时用)")
     p = hsub.add_parser("remove", help="删除主机(不影响已建立的会话)")
     p.add_argument("alias")
 

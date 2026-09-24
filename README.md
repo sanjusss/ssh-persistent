@@ -12,7 +12,7 @@ SSH 长连接管理工具:一次登录,后续命令和文件传输全部复用�
 ## 特性
 
 - 长连接复用:`exec` / `push` / `pull` 都不再重复认证
-- 多级链:本机 → 堡垒机 → 中转 → 目标,文件传输在中转机上用 `scp` 逐棒接力
+- 多级链:本机 → 堡垒机 → 中转 → 目标,文件传输在中转机上用 `scp` 逐棒接力;本机没开 `sshd` 也能传,经暂存主机换手
 - 主机管理:`host add` / `host remove` 增删主机,不用手改配置文件
 - 多会话隔离:同一台主机可以并行开多条独立会话
 - 断线自愈:会话断开自动重建一次
@@ -52,6 +52,13 @@ python3 $S exit A                       # 断开;exit --all 全部断开
 
 ```bash
 python3 $S host add local --host <本机地址> --user <本机用户> --password 'xxx'
+```
+
+本机没开 `sshd` 时上面的配法不可用,改用 `staging` 指定一台暂存主机(本机和链路最外层中转机都要能 ssh 到它),文件经它换手:
+
+```bash
+python3 $S host add relay --host 5.5.5.5 --user root --password 'xxx'
+python3 $S host add local --staging relay
 ```
 
 ## 作为 `Kimi Code` `skill`

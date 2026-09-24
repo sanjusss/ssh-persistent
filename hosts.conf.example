@@ -13,6 +13,7 @@
 #   `routing`   填 `username` 表示这是用户名路由型堡垒机:
 #               登录名自动拼成 <user>/<目标IP>/any,
 #               先过堡垒机密码,落地后再过目标机自己的 `login` 和 `password`
+#   `staging`   只用于 [local] 段:文件传输的暂存主机别名(本机没开 `sshd` 时用)
 #
 # [local] 是保留段:文件传输(push/pull)需要经中转主机把文件传回本机,
 # `host` 要填中转主机能访问到本机的地址(不是 127.0.0.1)。
@@ -20,6 +21,12 @@
 host=1.1.1.1
 user=myuser
 password=mypass
+
+# 本机没开 `sshd` 时,上面那种配法不可用:中转机无法 `scp` 回本机。
+# 改用 `staging` 指定一台暂存主机(本机和链路最外层中转机都要能 ssh 到它),
+# 文件经它换手;此时 [local] 自己的 `host` 等字段不用配:
+# [local]
+# staging=jump
 
 # 堡垒机(用户名路由型)
 [bastion]
