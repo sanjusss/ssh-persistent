@@ -1,133 +1,171 @@
 ---
 name: ssh-persistent
-description: 通过 SSH 长连接远程排查服务器。支持直连/标准跳板(`ControlMaster` 多路复用)和堡垒机(仅交互终端)两种场景,用 `ssh-mux.py` 统一管理连接、命令执行和文件传输。当需要对远程服务器执行多次 SSH 命令时使用。仅支持 Linux/`macOS`,`Windows` 请在 `WSL` 中使用。
+description: 通过 SSH 长连接排查远程服务器，适合需要多次执行命令或传输文件的任务。使用 `ssh-mux.py` 管理直连、标准跳板机和仅允许交互式登录的堡垒机。支持 Linux 和 `macOS`；`Windows` 需在 `WSL` 中运行。
 ---
 
-# SSH 持久连接(ssh-persistent)
+# SSH 长连接管理
 
-## 概述
+使用本目录中的 `ssh-mux.py` 连接服务器、执行命令和传输文件。主机地址、端口及登录信息保存在配置文件中，执行命令时引用主机别名。首次登录后，后续操作继续使用已有连接。
 
-用本目录下的 `ssh-mux.py` 管理所有远程访问。主机信息(IP、端口、用户名、密码)放在配置文件里,命令行只引用别名。一次登录,后续命令复用长连接,避免重复握手和认证。
+适用于远程排查、巡检、日志收集，以及通过跳板机或堡垒机访问内网主机。只执行一次命令时，无需使用本工具。目标主机必须能通过 SSH 访问。
 
-两种连接模式,按目标主机在配置里的写法自动选择:
+## 运行环境与连接方式
 
-- **`jump` 模式**:直连主机或标准 SSH 跳板机(支持 `-J`)。走 `ControlMaster` 多路复用,多次命令只需 1 次认证,后续延迟约 0.1 秒。
-- **`shell` 模式**:堡垒机只给交互终端(不支持 `-J`、`exec` 通道被拦截)。由后台守护进程持有一条"本机→堡垒机→…→目标"的终端会话链,命令像手工敲进终端一样发进去执行。
+本工具支持 Linux 和 `macOS`。原生 `Windows` 请在 `WSL`（`Windows` 的 Linux 子系统）中运行。脚本依赖 Unix 终端接口，`Windows` 版 `OpenSSH` 也不支持这里使用的连接复用功能。
 
-## 何时使用 / 不使用
+本机需要 Python 3、`ssh` 和 `scp`。脚本只使用 Python 标准库；`scp` 负责传输文件。`jump` 模式使用密码登录时，本机还需要 `sshpass`，用于自动填写密码。
 
-使用:对同一台服务器执行 2 次以上命令;远程排查、巡检、日志收集;需要经堡垒机或跳板机访问内网主机;需要在主机间传文件。
+脚本根据目标主机的配置选择连接方式：
 
-不使用:只执行单次命令;目标主机完全无法通过 SSH 到达;运行环境是原生 `Windows`(本工具依赖 Unix 的 `pty`、`fcntl` 等接口,只支持 Linux/`macOS`,`Windows` 上请在 `WSL` 里使用)。
+| 模式 | 适用情况 | 连接方式 |
+| --- | --- | --- |
+| `jump` | 直连，或经过支持 `ssh -J` 的标准跳板机 | 使用 `ControlMaster`，即 SSH 提供的连接复用功能。后续命令共用已建立的连接。 |
+| `shell` | 堡垒机只允许交互式登录，不支持 `ssh -J` 或直接执行远程命令 | 后台进程保持登录终端，依次登录中转主机和目标主机，再向终端发送命令。 |
 
-## 文件组成
+没有配置 `via` 时使用 `jump` 模式。配置 `via` 后，由 `via_mode` 指定模式，默认也是 `jump`。
 
-- `ssh-mux.py`:主程序,所有操作都通过它执行。用法:`python3 ssh-mux.py <子命令> ...`
-- `hosts.conf.example`:配置文件模板,各字段的写法示例
+## 添加主机
 
-## 配置文件
+配置文件默认位于 `~/.config/ssh-mux/hosts.conf`，可通过环境变量 `SSH_MUX_CONFIG` 更改。优先使用 `host add` 和 `host remove` 管理主机，也可以手动编辑文件。
 
-路径 `~/.config/ssh-mux/hosts.conf`(可用环境变量 `SSH_MUX_CONFIG` 改)。主机用 `host add` / `host remove` 子命令管理,不用手改文件:
+下面的地址和登录信息都是示例。将 `S` 设为本技能目录中脚本的实际路径：
 
 ```bash
-S=/path/to/ssh-persistent/ssh-mux.py    # 本文件同目录的脚本
+S=/path/to/ssh-persistent/ssh-mux.py
 
-python3 $S host add db --host 7.7.7.7 --user root --password 'xxx'          # 直连主机
-python3 $S host add bastion --host 2.2.2.2 --user T123456 \
-        --password 'xxx' --routing username                                  # 用户名路由型堡垒机
-python3 $S host add A --host 3.3.3.3 --user root --password 'xxx' \
-        --via bastion --via-mode shell                                       # 经堡垒机
+# 直接连接，db 是主机别名
+python3 $S host add db --host 7.7.7.7 --user root --password 'xxx'
+
+# 标准跳板机：先添加 jump，再添加通过 jump 访问的 web
+python3 $S host add jump --host 5.5.5.5 --port 2222 --user jump --password 'xxx'
 python3 $S host add web --host 6.6.6.6 --user root --password 'xxx' \
-        --via jump --via-mode jump                                           # 经标准跳板(-J)
-python3 $S host add local --host 1.1.1.1 --user myuser --password 'xxx' # [local] 保留段
-python3 $S host add local --staging jump    # 本机没开 `sshd` 时改这样:传输经暂存主机 `jump` 换手
-python3 $S host remove A                                                     # 删除(被 `via` 引用时拒绝)
+        --via jump --via-mode jump
+
+# 堡垒机：通过登录名指定目标 IP
+python3 $S host add bastion --host 2.2.2.2 --user T123456 \
+        --password 'xxx' --routing username
+python3 $S host add A --host 3.3.3.3 --user root --password 'xxx' \
+        --via bastion --via-mode shell
+
+# 从 A 继续登录 B
+python3 $S host add B --host 4.4.4.4 --user root --password 'xxx' \
+        --via A --via-mode shell
+
+python3 $S list
+python3 $S host remove B
 ```
 
-`host add` 只写配置不建连;文件保存为 `600` 权限,重写时注释会丢失。也可以直接手改配置文件,格式如下,每台主机一段,段名即别名:
+`host add` 只保存配置，不连接主机。别名已存在时，需要先删除再添加。如果其他主机的 `via` 引用了某个别名，脚本会拒绝删除该别名。删除配置不会断开已经建立的会话。
 
-```ini
-[local]                    # 保留段:文件传输用,host 填中转主机能访问到本机的地址
-host=1.1.1.1
-user=myuser
-password=mypass
-# staging=jump             # 本机没开 `sshd` 时改配这项:传输经暂存主机换手,上面三个字段可省
+脚本保存配置时会将权限设为 `600`，即只有文件所有者可以读写。保存时会重写整个配置文件，原有注释会丢失。密码以明文保存，请勿把真实配置提交到公开仓库。
 
-[bastion]                  # 用户名路由型堡垒机
-host=2.2.2.2
-user=T123456
-password=jump-pass
-routing=username           # 登录名自动拼成 T123456/<目标IP>/any
+### 手动编辑配置
 
-[A]                        # 经堡垒机访问的主机
-host=3.3.3.3
-user=root
-password=a-pass
-via=bastion
-via_mode=shell             # 堡垒机只给交互终端
+配置采用 `INI` 格式：每台主机占一个 `[别名]` 段，下面填写 `字段=值`。各字段的含义、默认值和完整示例统一放在 [hosts.conf.example](hosts.conf.example) 中，手动编辑时查阅该文件。
 
-[B]                        # 经 A 访问的主机
-host=4.4.4.4
-user=root
-password=b-pass
-via=A
-via_mode=shell
+`routing=username` 适用于登录名格式为 `<账号>/<目标IP>/any` 的堡垒机。脚本先填写堡垒机密码，再根据目标机的提示填写用户名和密码。
 
-[web]                      # 经标准跳板(-J)访问的主机
-host=6.6.6.6
-user=root
-password=web-pass
-via=jump
-via_mode=jump
-```
+密码中的 `%` 等特殊字符无需转义。手动编辑配置时，不要在密码后面添加行内注释，以免注释被当作密码的一部分。
 
-字段:`host`(必填)、`port`(默认 22)、`user`(默认当前用户)、`password`(不配走密钥)、`via`(跳板别名)、`via_mode`(`jump` 标准跳板,默认;`shell` 堡垒机)、`routing=username`(用户名路由型堡垒机,只标在堡垒机自己身上)、`staging`(只用于 `[local]` 段,见下)。密码明文保存,等号后内容原样读取,特殊字符不用转义。
-
-`[local]` 段有两种配法:本机开了 `sshd` 时配 `host`/`user`/`password`,中转机直接 `scp` 回本机;本机没开 `sshd` 时配 `staging=<别名>`,指向一台本机和链路最外层中转机都能 ssh 到的暂存主机,文件经它换手。暂存主机必须是 `jump` 模式可直连的主机(可以有 `jump` 跳板链),且要配 `password`。
-
-## 命令用法
+## 执行命令
 
 ```bash
-S=/path/to/ssh-persistent/ssh-mux.py    # 本文件同目录的脚本
-
-python3 $S connect A                    # 建立长连接(已连接则跳过)
-python3 $S exec A 'uptime'              # 执行远程命令,未连接时自动建连
+python3 $S connect A                  # 提前连接；已连接时跳过
+python3 $S exec A 'uptime'            # 未连接时自动登录
 python3 $S exec A 'ps aux --sort=-%cpu | head -20'
-python3 $S push A ./app.tar.gz /tmp/    # 上传文件
-python3 $S pull B /var/log/app.log ./   # 下载文件(B 经 A 中转)
-python3 $S status                       # 所有主机的连接状态
-python3 $S list                         # 配置里有哪些主机
-python3 $S host add db --host 7.7.7.7 --user root --password 'xxx'  # 添加主机
-python3 $S host remove db               # 删除主机(详见上文"配置文件"一节)
-python3 $S exit A                       # 断开;exit --all 全部断开
+python3 $S status                     # 查看连接状态
+python3 $S exit A                     # 断开 A 的连接；shell 模式下断开 A 的所有会话
+python3 $S exit --all                 # 断开所有主机的连接
 ```
 
-`exec` 的退出码就是远程命令的退出码,输出是远程命令的输出(已剥掉终端回显和颜色码)。`--session` 和 `--timeout` 可以放在别名前后任意位置(默认 120 秒,超时自动发 `Ctrl-C` 并恢复会话)。
+`exec` 返回远程命令的退出码和输出。`shell` 模式会去除终端回显（终端重复显示的输入内容）和颜色控制码。
 
-文件传输说明:`shell` 模式下本机与目标之间没有直接通道,`push`/`pull` 在中转主机上用 `scp` 逐棒接力(本机→`A`→`B` 或反向),依赖配置里 `[local]` 段。本机没开 `sshd` 时,按上文的 `staging` 配法走暂存主机换手。`jump` 模式直接走 `scp` 复用长连接。
-
-## 多 `agent` 并发
-
-同一个 `agent` 的多条命令共享一条会话;不同 `agent` 必须用 `--session` 隔开,否则会话状态(当前目录、环境变量)互相污染:
+`exec` 的 `--session`、`--timeout` 选项可以放在别名或命令前后。`shell` 模式默认等待命令执行 `120` 秒，超时后发送 `Ctrl-C`，尝试恢复会话。需要等待更长时间时，增加 `--timeout`：
 
 ```bash
-python3 $S exec A --session case-1234 'uptime'    # agent 甲
-python3 $S exec A --session case-5678 'df -h'     # agent 乙,独立会话链
-python3 $S exit A --session case-1234             # 只断开自己的会话
+python3 $S exec A --timeout 300 'some-command'
 ```
 
-每条会话独立走完整登录链(建链几秒),之后命令即时执行。不带 `--session` 时用 `default` 会话。注意堡垒机对同一账号的并发会话数可能有上限。
+当前 `jump` 模式不使用 `--session` 和 `--timeout`；这两个选项用于 `shell` 模式。
 
-## 工作原理
+### 多个任务使用独立会话
 
-**`jump` 模式**:`sshpass` + `ControlMaster` 建后台主连接,socket 在 `/tmp/ssh_mux_j_<主机>_<端口>_<用户>`;后续 ssh/`scp` 复用 socket 不再认证;空闲 `SSH_MUX_PERSIST` 秒(默认 600)自动关闭。
+`shell` 模式会保留当前目录、环境变量等状态。同一个人工智能助手执行同一任务时，可以共用会话。多个助手并行工作时，必须为各自的任务指定不同的 `--session`，避免相互影响。
 
-**`shell` 模式**:每个 (别名, 会话) 一个守护进程,持有 `pty` 终端会话链。建链时自动应答各层登录提示(堡垒机密码 → 目标机 `login:`/`password:`),落稳后关回显、清提示符。`exec` 用随机标记包住命令来截取输出和退出码;会话断开自动重建一次。socket、日志在 `/tmp/ssh_mux_s_<别名>_<会话>.{sock,log}`,建链失败原因在 `.err` 文件里。
+```bash
+python3 $S exec A --session case-1234 'uptime'  # 助手甲
+python3 $S exec A --session case-5678 'df -h'   # 助手乙
+python3 $S exit A --session case-1234          # 只断开助手甲的会话
+```
 
-## 注意事项
+不指定 `--session` 时使用 `default` 会话。每个独立会话都需要从头完成登录，之后才可继续使用。堡垒机可能限制同一账号的同时在线会话数。
 
-- `exec` 的命令是"敲进终端"的语义:单行不要超过约 4000 字符(终端行缓冲限制);不要跑需要交互输入的命令(`vi`、`top` 前台、`read`),长任务自己加 `nohup ... &` 或加 `--timeout`
-- 文件传输的每一棒优先用中转主机上的 `sshpass` 喂密码;中转机没有 `sshpass` 时,回退到自动应答密码提示。回退路径下,命令输出里若恰好出现 `password:` 字样可能误触发,属于已知小风险
-- 排查结束后跑 `exit`(或 `exit --all`)清理;忘记了也会按 `SSH_MUX_PERSIST` 超时自动清理
-- 依赖:python3(只用标准库)、ssh、`scp`;`jump` 模式密码认证需要本机有 `sshpass`,文件传输建议中转主机也装上 `sshpass`(不装会自动回退)
-- 环境变量:`SSH_MUX_CONFIG`(配置文件路径)、`SSH_MUX_SOCKET_DIR`(socket 目录,默认 /tmp)、`SSH_MUX_PERSIST`(空闲自动断开秒数,默认 600)
+## 传输文件
+
+```bash
+python3 $S push A ./app.tar.gz /tmp/   # 上传文件
+python3 $S pull B /var/log/app.log ./  # 下载文件
+```
+
+`jump` 模式直接使用 `scp`，共用已建立的 SSH 连接。
+
+`shell` 模式通过中转主机运行 `scp`，逐台复制文件。例如访问路径为“本机 → `A` → `B`”时，上传文件先到 `A`，再从 `A` 复制到 `B`。下载顺序相反。这种模式需要配置 `[local]`，下面两种方式选一种。
+
+### 本机可以接受 SSH 登录
+
+本机运行 `sshd`（接收 SSH 登录的服务）时，在 `[local]` 中填写本机地址和登录信息：
+
+```bash
+python3 $S host add local --host 1.1.1.1 --user myuser --password 'xxx'
+```
+
+地址必须能被中转主机访问，不能填写 `127.0.0.1`。中转主机通过 `scp` 从本机读取文件，或把文件写回本机。这种传输方式需要配置本机的登录密码。
+
+### 本机不能接受 SSH 登录
+
+用 `staging` 指定一台暂存主机。本机和连接路径上的第一台中转主机都必须能通过 SSH 登录这台服务器。
+
+```bash
+python3 $S host add relay --host 5.5.5.5 --user root --password 'xxx'
+python3 $S host add local --staging relay
+```
+
+上传时，本机先上传到暂存主机，中转主机再从那里取文件。下载时，中转主机先上传到暂存主机，本机再下载。
+
+暂存主机必须使用 `jump` 模式，可以经过标准跳板机访问，并且必须配置 `password`。使用 `staging` 后，`[local]` 的 `host`、`user`、`password` 可以省略。如果已有 `[local]`，先删除再按所选方式添加。
+
+每次在中转主机上复制文件时，脚本优先使用那台主机上的 `sshpass` 填写密码。没有 `sshpass` 时，脚本会尝试识别密码提示并应答。如果输出中恰好出现 `password:`，可能被误认为密码提示。
+
+## 使用限制与断线处理
+
+- `shell` 模式向终端发送命令，单行命令不要超过约 4000 字符，以免超过终端的输入缓冲限制。
+- `shell` 模式不要运行需要手动交互的命令，例如 `vi`、前台 `top` 或 `read`。长任务可增加 `--timeout`，或使用 `nohup ... &` 在后台运行。
+- `shell` 会话断开后，脚本会尝试重建一次并重试命令。原命令可能已经执行，需确认重复执行不会产生额外影响。命令超时不会自动重试。
+- 排查结束后运行 `exit`，或运行 `exit --all` 断开全部连接。默认空闲 600 秒也会自动断开。
+
+## 工作原理与排查文件
+
+`jump` 模式用 `ControlMaster` 建立后台 SSH 连接。后续 `ssh` 和 `scp` 通过本机的套接字（进程间通信接口）使用这条连接，无需重新认证。套接字默认位于 `/tmp/ssh_mux_j_<主机>_<端口>_<用户>`。
+
+`shell` 模式为每个“主机别名 + 会话名”启动一个守护进程，即持续在后台运行的进程。守护进程使用 `pty`（伪终端，供程序模拟终端输入输出）保持登录，自动应答各层登录提示。
+
+登录完成后，脚本关闭终端回显并清空命令提示符。执行命令时，在输出前后添加随机标记，以识别命令输出和退出码。
+
+`shell` 模式的文件默认位于 `/tmp/`，名称以 `ssh_mux_s_<别名>_<会话>` 开头：
+
+| 后缀 | 用途 |
+| --- | --- |
+| `.sock` | 命令行工具与守护进程通信的套接字。 |
+| `.log` | 守护进程日志。 |
+| `.err` | 建立会话失败时记录的错误。 |
+| `.pid` | 守护进程的进程号。 |
+
+连接失败时，先查看命令给出的错误和日志路径。
+
+### 环境变量
+
+| 变量 | 用途 | 默认值 |
+| --- | --- | --- |
+| `SSH_MUX_CONFIG` | 配置文件路径 | `~/.config/ssh-mux/hosts.conf` |
+| `SSH_MUX_SOCKET_DIR` | 套接字及会话文件所在目录 | `/tmp` |
+| `SSH_MUX_PERSIST` | 空闲多久后自动断开，单位为秒 | `600` |

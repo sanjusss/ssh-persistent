@@ -1,79 +1,52 @@
 # ssh-persistent
 
-SSH 长连接管理工具:一次登录,后续命令和文件传输全部复用同一条连接,不用反复握手认证。单文件 Python 脚本,只用标准库。
+用 `ssh-mux.py` 保持 SSH 连接，方便反复排查同一台服务器。首次登录后，后续命令和文件传输继续使用已有连接。支持直接连接、标准跳板机，以及只允许交互式登录的堡垒机。
 
-两种场景都能用:
+脚本可以手动运行，也可以供人工智能助手调用。
 
-- **直连 / 标准跳板机**:走 `ControlMaster` 多路复用,一次认证后命令延迟约 0.1 秒
-- **堡垒机**:只给交互终端(不支持 `-J`)也能用。支持"用户名路由"型堡垒机(登录名拼成 `<账号>/<目标IP>/any` 选择目标),由后台守护进程持有终端会话链,命令像手工敲进终端一样执行
+## 安装与快速开始
 
-人工排查服务器可以用,给 `AI agent` 当 SSH 工具更顺手:命令行只引用主机别名,密码不出现在命令里;不同 `agent` 用 `--session` 隔开会话,互不干扰。
+需要 Linux 或 `macOS`、Python 3，以及 `ssh`、`scp` 命令。原生 `Windows` 请在 `WSL`（`Windows` 的 Linux 子系统）中运行。脚本只使用 Python 标准库，无需安装 Python 依赖包。
 
-## 特性
-
-- 长连接复用:`exec` / `push` / `pull` 都不再重复认证
-- 多级链:本机 → 堡垒机 → 中转 → 目标,文件传输在中转机上用 `scp` 逐棒接力;本机没开 `sshd` 也能传,经暂存主机换手
-- 主机管理:`host add` / `host remove` 增删主机,不用手改配置文件
-- 多会话隔离:同一台主机可以并行开多条独立会话
-- 断线自愈:会话断开自动重建一次
-
-## 运行环境
-
-- 平台:Linux 或 `macOS`。原生 `Windows` 不支持(依赖 Unix 的 `pty`、`fcntl` 等接口,且 `Win32-OpenSSH` 不支持连接多路复用),`Windows` 请使用 `WSL`
-- python3(只用标准库)
-- 本机有 `ssh`、`scp`;密码认证需要 `sshpass`
-- 文件传输建议中转主机也装 `sshpass`(没有会自动回退到交互式应答)
-
-## 快速上手
+下面演示直接连接服务器。使用密码登录时，本机还需要 `sshpass`，用于自动填写密码；使用密钥登录时，省略 `--password`。
 
 ```bash
 git clone https://github.com/sanjusss/ssh-persistent.git
 cd ssh-persistent
 S=./ssh-mux.py
 
-# 添加主机(配置保存在 ~/.config/ssh-mux/hosts.conf)
+# 将地址、用户名和密码替换为实际信息，db 是自己起的主机别名
 python3 $S host add db --host 7.7.7.7 --user root --password 'xxx'
 
-# 经用户名路由型堡垒机的主机
-python3 $S host add bastion --host 2.2.2.2 --user T123456 \
-        --password 'xxx' --routing username
-python3 $S host add A --host 3.3.3.3 --user root --password 'xxx' \
-        --via bastion --via-mode shell
+# 首次执行时自动登录，之后继续使用已有连接
+python3 $S exec db 'uptime'
+python3 $S exec db 'df -h'
 
-# 日常使用
-python3 $S exec A 'uptime'              # 执行远程命令(未连接时自动建连)
-python3 $S push A ./app.tar.gz /tmp/    # 上传文件
-python3 $S pull A /var/log/app.log ./   # 下载文件
-python3 $S status                       # 查看所有连接状态
-python3 $S exit A                       # 断开;exit --all 全部断开
+# 排查结束后断开连接
+python3 $S exit db
 ```
 
-文件传输依赖配置里的 `[local]` 段(中转主机回连本机用的地址和凭据):
+配置默认保存在 `~/.config/ssh-mux/hosts.conf`，其中的密码以明文保存。请勿把真实配置提交到公开仓库。
 
-```bash
-python3 $S host add local --host <本机地址> --user <本机用户> --password 'xxx'
-```
+## 作为技能安装
 
-本机没开 `sshd` 时上面的配法不可用,改用 `staging` 指定一台暂存主机(本机和链路最外层中转机都要能 ssh 到它),文件经它换手:
+把整个目录放到 `~/.agents/skills/ssh-persistent/`，或项目的 `.agents/skills/ssh-persistent/` 下，供支持此技能目录的助手使用。技能入口为 [SKILL.md](SKILL.md)。
 
-```bash
-python3 $S host add relay --host 5.5.5.5 --user root --password 'xxx'
-python3 $S host add local --staging relay
-```
+## 按任务查阅
 
-## 作为 `Kimi Code` `skill`
+| 要做的事 | 查看位置 |
+| --- | --- |
+| 配置直连、跳板机或堡垒机 | [添加主机](SKILL.md#添加主机) |
+| 执行命令、设置超时、使用独立会话 | [执行命令](SKILL.md#执行命令) |
+| 上传、下载文件，配置暂存主机 | [传输文件](SKILL.md#传输文件) |
+| 了解命令限制和断线重试 | [使用限制与断线处理](SKILL.md#使用限制与断线处理) |
+| 查找日志、修改配置路径和空闲超时 | [工作原理与排查文件](SKILL.md#工作原理与排查文件) |
+| 手动编辑配置文件 | [hosts.conf.example](hosts.conf.example) |
 
-本目录同时是一个 `skill`:把整个目录放到 `~/.agents/skills/`(或项目的 `.agents/skills/`)下,`agent` 会自动按 `SKILL.md` 的说明调用脚本。
+## 文件说明
 
-## 文档
-
-- `SKILL.md`:完整命令用法、多 `agent` 并发、工作原理和注意事项
-- `hosts.conf.example`:配置文件各字段的写法
-
-## 安全说明
-
-密码在配置文件里明文保存(`~/.config/ssh-mux/hosts.conf`,权限自动设为 `600`)。这是设计取舍:工具面向受信任的排查环境,换取配置和使用的简单。请勿把真实配置文件提交到公开仓库。
+`SKILL.md` 保存完整操作说明，`hosts.conf.example` 说明配置字段，`ssh-mux.py` 执行具体操作。脚本和配置示例都放在技能根目录中。
 
 ## 许可证
 
-MIT,见 `LICENSE` 文件。
+采用 `MIT` 许可证，见 [LICENSE](LICENSE)。

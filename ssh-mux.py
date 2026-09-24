@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""ssh-mux:SSH 长连接管理
+"""ssh-mux：保持 SSH 连接，供后续命令和文件传输使用。
 
-两种连接模式:
-- `jump`:直连主机或标准 SSH 跳板(支持 `-J`),走 `ControlMaster` 多路复用
-- `shell`:堡垒机只给交互终端,由守护进程持有 `pty` 会话链,CLI 经 Unix socket 发命令
+两种连接模式：
+- `jump`：直连或通过标准跳板机，使用 `ControlMaster` 让多个命令共用连接。
+- `shell`：通过堡垒机的交互式终端登录，由后台进程保持登录状态。
 
-主机信息在配置文件里(INI),命令行只引用别名。
+主机信息保存在 INI 配置文件中，命令行通过主机别名选择目标。
+`shell` 模式使用 `pty`（伪终端）模拟终端输入输出，
+命令行工具通过 Unix 套接字与后台进程通信。
 """
 
 import argparse
@@ -33,9 +35,9 @@ CONFIG_PATH = os.environ.get("SSH_MUX_CONFIG", os.path.expanduser("~/.config/ssh
 SOCKET_DIR = os.environ.get("SSH_MUX_SOCKET_DIR", "/tmp")
 PERSIST = int(os.environ.get("SSH_MUX_PERSIST", "600"))  # 空闲自动退出秒数
 AUTH_STEP_TIMEOUT = 30    # 每一步登录提示的最长等待
-DAEMON_BOOT_TIMEOUT = 90  # 等待守护进程完成登录链
-XFER_TIMEOUT = 3600       # 文件传输单棒最长时长
-DEBUG_PTY = bool(os.environ.get("SSH_MUX_DEBUG"))  # 置 1 后把 `pty` 流量写进守护进程日志
+DAEMON_BOOT_TIMEOUT = 90  # 等待后台进程依次登录到目标主机
+XFER_TIMEOUT = 3600       # 每两台主机之间传输文件的超时秒数
+DEBUG_PTY = bool(os.environ.get("SSH_MUX_DEBUG"))  # 设为非空值后，将终端收到的数据写入后台进程日志
 
 # 识别 `pty` 输出里的各类提示
 PW_RX = re.compile(rb"(?i)password[^:\n]{0,40}:\s*$")
@@ -86,7 +88,7 @@ class Host:
 def load_config():
     if not os.path.isfile(CONFIG_PATH):
         die(f"配置文件不存在: {CONFIG_PATH}(格式参考同目录的 `hosts.conf.example`)")
-    cp = configparser.ConfigParser(interpolation=None)  # 关掉插值,密码里可能有 %
+    cp = configparser.ConfigParser(interpolation=None)  # 禁用变量替换，保留密码中的 % 字符
     cp.read(CONFIG_PATH)
     return cp
 
@@ -121,7 +123,7 @@ def build_chain(cp, alias):
 
 
 def shell_hops(chain):
-    """去掉 `routing=username` 的堡垒机:它们只做接力,不产生独立 shell"""
+    """跳过 `routing=username` 的堡垒机：这类堡垒机直接转到目标，不提供独立终端"""
     hops = []
     for i, h in enumerate(chain):
         if h.routing == "username":
@@ -143,7 +145,7 @@ def ssh_step(cp, h):
         via = get_host(cp, h.via)
         if via.routing == "username":
             # 用户名路由堡垒机:登录名 <堡垒机账号>/<目标IP>/any
-            # 先过堡垒机密码,落地后再过目标机自己的 `login`/`password`
+            # 先填写堡垒机密码，再根据目标机的提示填写用户名和密码
             args = base + ["-p", str(via.port), f"{via.user}/{h.host}/any@{via.host}"]
             auth = [(PW_RX, via.password), (LOGIN_RX, h.user), (PW_RX, h.password)]
             return args, auth
@@ -153,7 +155,7 @@ def ssh_step(cp, h):
 
 
 def build_shell_plan(cp, alias):
-    """`shell` 模式的完整登录计划:第 0 步是本地启动,其余在上一层 shell 里敲"""
+    """`shell` 模式的登录步骤：本机发起首次登录，后续在上一台主机的终端中执行"""
     chain = build_chain(cp, alias)
     hops = shell_hops(chain)
     if not hops:
@@ -164,7 +166,7 @@ def build_shell_plan(cp, alias):
 # ---------- `shell` 模式:`pty` 会话 ----------
 
 class PtySession:
-    """持有 '本机 -> ... -> 目标' 的 `pty` 会话链,支持建链、发命令、重建"""
+    """保持从本机到目标的终端连接，支持登录、执行命令和重新连接"""
 
     def __init__(self, plan, log):
         self.plan = plan
@@ -227,10 +229,11 @@ class PtySession:
             self._send_line(secret)
 
     def _settle(self):
-        """shell 就绪确认:关回显、清提示符和颜色。
-        登录刚结束时对端可能清空输入缓冲(排队输入被丢弃),探针要反复发,
-        直到看到标记回来为止。探针用 `printf` 拼接,使敲入的命令回显里
-        不会出现完整标记,避免误判"""
+        """确认远程终端可以执行命令，然后关闭回显、提示符和颜色。
+        登录后远程主机可能清空输入缓冲，因此反复发送打印标记的命令，
+        直到收到标记。标记由 `printf` 拼接生成，输入命令中没有完整标记，
+        避免把终端回显误认为命令执行结果。
+        """
         tok = rand_token()
         rx = re.compile(rb"__RD_" + tok.encode() + rb"__")
         deadline = time.time() + AUTH_STEP_TIMEOUT
@@ -254,8 +257,8 @@ class PtySession:
         m, s = pty.openpty()
         # 窗口调大,减少折行对输出解析的干扰
         fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 220, 0, 0))
-        # 新会话 + 把 `pty` 设为控制终端:ssh 读密码要走 /dev/tty,
-        # 没有控制终端它会去找 `ssh-askpass` 而不是等我们的输入
+        # 创建新会话，并将伪终端设为控制终端。SSH 通过 /dev/tty 读取密码。
+        # 没有控制终端时，SSH 会尝试调用 `ssh-askpass`，无法读取脚本发送的密码。
         def _preexec():
             os.setsid()
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
@@ -273,13 +276,14 @@ class PtySession:
         except Exception:
             self.close()
             raise
-        self.log("会话链就绪")
+        self.log("已登录到目标主机")
 
     def exec(self, command, timeout, password=None):
-        """发命令并用随机标记截取输出。结束探针不能提前排队:读 stdin 的命令
-        (如 `scp` 等密码提示)会把排队的探针行当成输入吃掉,所以等输出停顿后
-        再发,并定期补发。`password` 用于执行期间自动应答密码提示;
-        返回 (输出, 退出码)"""
+        """执行命令，用随机标记识别输出范围，返回 (输出, 退出码)。
+        用于打印结束标记的命令需要等输出暂停后发送，并定期重发。
+        提前发送可能让读取标准输入的程序将这条命令当作输入，
+        例如等待密码的 `scp`。`password` 用于自动应答密码提示。
+        """
         tok = rand_token()
         xs = f"__XS_{tok}__".encode()
         xe = re.compile(rb"__XE_" + tok.encode() + rb"__(\d+)")
@@ -305,20 +309,20 @@ class PtySession:
                     return clean_output(self.buf[:m.start()]), int(m.group(1))
                 if password and answers < 3 and PW_RX.search(self.buf):
                     # 密码提示:每次出现都要应答(最多 3 次)。ssh 每次尝试前
-                    # 会清空输入缓冲,只答一次会被后续尝试卡住
+                    # 会清空输入缓冲，因此后续重试也需要重新填写密码
                     self.buf = b""
                     self._send_line(password)
                     answers += 1
                     last_output = time.time()
                 elif password is None:
-                    # 带密码应答时不发探针:两次密码提示之间的空窗期无法可靠
-                    # 识别,探针可能被当成密码吃掉
+                    # 自动填写密码时不发送标记命令：无法确定程序何时读取密码，
+                    # 标记命令可能被误当作密码输入
                     quiet = time.time() - last_output
                     if not probed and quiet > 1.0:
                         self._send_line(probe)
                         probed = True
                     elif probed and quiet > 3.0:
-                        # 探针可能被 stdin 吃掉或命令仍在跑,定期补发
+                        # 标记命令可能被程序作为标准输入读取，或原命令尚未结束，因此定期重发
                         self._send_line(probe)
                         last_output = time.time()
             remain = deadline - time.time()
@@ -334,7 +338,7 @@ class PtySession:
                 last_output = time.time()
 
     def _recover(self):
-        """命令超时后把会话同步回来:先发 `Ctrl-C`,再反复发探针确认"""
+        """命令超时后发送 `Ctrl-C`，再反复打印标记，确认终端恢复响应"""
         try:
             self._write(b"\x03")
             time.sleep(0.3)
@@ -395,7 +399,7 @@ def do_exec(sess, req, log):
         out, code = sess.exec(command, timeout, password)
         return {"status": "ok", "exit": code, "output": out}
     except TimeoutError as exc:
-        # 命令已发出且超时,不能重发(可能重复执行);会话若已乱则重建备用
+        # 超时的命令可能已经执行，不能重发；会话无法继续使用时重新连接
         try:
             sess.rebuild()
             log("命令超时后会话已重建")
@@ -403,8 +407,8 @@ def do_exec(sess, req, log):
             pass
         return {"status": "error", "error": str(exc)}
     except ConnectionError as exc:
-        # 会话断了:重建一次再执行(命令可能未发出,重发是安全的;已发出的情况
-        # 无法区分,调用方需注意命令幂等性)
+        # 连接断开后，重新登录并重试一次。无法确认原命令是否已经执行，
+        # 调用方需要确保重复执行不会产生额外影响。
         log(f"会话断开({exc}),尝试重建")
         try:
             sess.rebuild()
@@ -431,7 +435,7 @@ def daemon_main(alias, session):
         sess = PtySession(build_shell_plan(cp, alias), log)
         sess.start()
     except Exception as exc:
-        # 建链失败写 `.err` 文件,CLI 轮询时读到就能报出原因
+        # 登录失败时将错误写入 `.err` 文件，命令行工具读取后显示失败原因
         with open(shell_err_path(alias, session), "w") as f:
             f.write(str(exc))
         log(f"建立会话失败: {exc}")
@@ -504,7 +508,7 @@ def daemon_main(alias, session):
         log("守护进程退出")
 
 
-# ---------- CLI 与守护进程通信 ----------
+# ---------- 命令行工具与后台进程通信 ----------
 
 def rpc(alias, session, req, timeout=30):
     """向守护进程发一条请求;连不上返回 `None`"""
@@ -557,7 +561,7 @@ def ping_session(alias, session):
 
 
 def ensure_daemon(alias, session):
-    """保证守护进程在跑;不在就启动并等它完成登录链"""
+    """确保后台进程已经启动，并等待完成到目标主机的登录"""
     if ping_session(alias, session):
         return
     err = shell_err_path(alias, session)
@@ -570,7 +574,7 @@ def ensure_daemon(alias, session):
         subprocess.Popen([sys.executable, os.path.abspath(__file__), "_daemon", alias, session],
                          stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
                          start_new_session=True)
-    # 守护进程可能正在建链或忙于长命令,轮询等它可用
+    # 后台进程可能正在登录或执行长命令，定期检查是否可以接受请求
     deadline = time.time() + DAEMON_BOOT_TIMEOUT
     while time.time() < deadline:
         if os.path.isfile(err):
@@ -660,7 +664,7 @@ def jump_exit(h):
     return True
 
 
-# ---------- `shell` 模式的 CLI 操作 ----------
+# ---------- `shell` 模式的命令行操作 ----------
 
 def shell_exec(alias, session, command, timeout, password=None):
     ensure_daemon(alias, session)
@@ -674,14 +678,14 @@ def shell_exec(alias, session, command, timeout, password=None):
 
 
 def scp_spec(h, path):
-    """拼 `scp` 的远程路径参数:远端 shell 和本地 shell 各引一次"""
+    """生成 `scp` 的远程路径参数，分别为远程和本地命令解释器添加引号"""
     return shlex.quote(f"{h.user}@{h.host}:{shlex.quote(path)}")
 
 
 def xfer_leg(hop, session, command, password, timeout):
     """在中转主机 `hop` 的会话里执行一条 `scp`,失败即报错退出。
-    优先用 `sshpass` 喂密码,比 `pty` 应答稳定;中转机没有 `sshpass` 时
-    回退到 `pty` 密码应答"""
+    优先用 `sshpass` 填写密码，减少识别终端提示造成的错误。
+    中转主机没有 `sshpass` 时，识别终端中的密码提示并自动填写"""
     r = shell_exec(hop.alias, session,
                    f"sshpass -p {shlex.quote(password)} {command}", timeout)
     if r["exit"] == 127 and "sshpass" in r["output"]:
@@ -691,8 +695,10 @@ def xfer_leg(hop, session, command, password, timeout):
 
 
 def get_staging(cp):
-    """解析 [local] 段的 `staging` 字段:本机没开 `sshd` 时,文件传输经这台
-    暂存主机换手(本机和链路最外层中转机都要能 ssh 到它)。返回 `Host` 或 `None`"""
+    """读取 [local] 的 `staging`，返回暂存主机 `Host` 或 `None`。
+    本机未运行 SSH 服务时，通过这台主机暂存文件。
+    本机和连接路径上的第一台中转主机都需要能通过 SSH 登录暂存主机。
+    """
     if not cp.has_section("local"):
         return None
     alias = cp["local"].get("staging", "").strip()
@@ -709,8 +715,9 @@ def get_staging(cp):
 
 
 def xfer_endpoint(cp):
-    """确定文件传输的本机侧终点:配了 `staging` 走暂存主机,否则中转机
-    直接 `scp` 回本机。返回 (暂存主机或 `None`, [local] 主机或 `None`)"""
+    """选择文件传输方式：使用暂存主机，或让中转主机直接访问本机。
+    返回 (暂存主机或 `None`, [local] 主机或 `None`)。
+    """
     staging = get_staging(cp)
     if staging is not None:
         return staging, None
@@ -722,8 +729,9 @@ def xfer_endpoint(cp):
 
 
 def shell_push(cp, target, session, local_path, remote_path, timeout):
-    """上传:本机 -> 最外层中转 -> 逐跳 -> 目标,逐跳部分在中转主机的会话里
-    编排。配了 `staging` 时本机先把文件推到暂存主机,中转机再从那里拉"""
+    """上传文件：沿登录路径，在各台中转主机上运行复制命令，直到目标主机。
+    配置了 `staging` 时，本机先上传到暂存主机，中转主机再从那里下载。
+    """
     staging, local = xfer_endpoint(cp)
     src = os.path.abspath(local_path)
     if not os.path.exists(src):
@@ -759,8 +767,9 @@ def shell_push(cp, target, session, local_path, remote_path, timeout):
 
 
 def shell_pull(cp, target, session, remote_path, local_path, timeout):
-    """下载:目标 -> 逐跳 -> 最外层中转 -> 本机。
-    配了 `staging` 时中转机把文件推到暂存主机,本机再从那里拉回来"""
+    """下载文件：从目标主机开始，按登录路径的相反顺序逐台复制到本机。
+    配置了 `staging` 时，中转主机先上传到暂存主机，本机再从那里下载。
+    """
     staging, local = xfer_endpoint(cp)
     hops = shell_hops(build_chain(cp, target.alias))
     tmp = f"/tmp/.ssh_mux_xfer_{rand_token()}"
@@ -815,7 +824,7 @@ def cmd_status(cp):
             continue
         h = get_host(cp, alias)
         if h.routing == "username":
-            print(f"{alias}  {h.addr()}  堡垒机(用户名路由,仅接力)")
+            print(f"{alias}  {h.addr()}  堡垒机(通过登录名选择目标，不提供独立终端)")
             continue
         if host_mode(h) == "jump":
             state = "已连接" if jump_check(h) else "未连接"
@@ -840,7 +849,7 @@ def cmd_list(cp):
 
 
 def load_config_for_edit():
-    """供增删主机用:配置文件不存在时从空配置起步"""
+    """供增删主机用:配置文件不存在时创建空配置"""
     cp = configparser.ConfigParser(interpolation=None)
     if os.path.isfile(CONFIG_PATH):
         cp.read(CONFIG_PATH)
@@ -931,7 +940,7 @@ def cmd_exit(cp, alias, session):
 
 def run_exec_cli(argv):
     """`exec` 单独解析参数:`--session`/`--timeout` 允许出现在命令前后任意位置
-    (`argparse` 的 `REMAINDER` 会把选项吞进命令,所以不用它)"""
+    (`argparse` 的 `REMAINDER` 会将这些选项当作远程命令的一部分，因此单独解析)"""
     session, timeout, alias = "default", 120, None
     cmd = []
     i = 0
@@ -993,7 +1002,7 @@ def main():
 
     def add_session(p):
         p.add_argument("--session", default="default",
-                       help="会话名,多 `agent` 并发时用于隔离(默认 `default`)")
+                       help="shell 模式的会话名；多个任务使用不同名称以免相互影响，默认 default")
 
     p = sub.add_parser("connect", help="建立长连接(已连接则跳过)")
     p.add_argument("alias")
@@ -1024,20 +1033,20 @@ def main():
 
     hp = sub.add_parser("host", help="管理配置里的主机(增/删)")
     hsub = hp.add_subparsers(dest="host_cmd", required=True)
-    p = hsub.add_parser("add", help="添加主机(只写配置,不建连)")
+    p = hsub.add_parser("add", help="添加主机配置，这一步不会连接服务器")
     p.add_argument("alias", help="主机别名;`local` 是文件中转用的保留段")
     p.add_argument("--host", default=None,
                    help="主机地址(IP 或域名);`local` 段配了 `--staging` 时可省")
     p.add_argument("--port", type=int, default=None, help="SSH 端口(默认 22)")
     p.add_argument("--user", default=None, help="登录用户名(默认当前本机用户)")
-    p.add_argument("--password", default=None, help="登录密码,明文保存;不配则走密钥认证")
+    p.add_argument("--password", default=None, help="登录密码,明文保存;不配置时使用密钥认证")
     p.add_argument("--via", default=None, help="跳板/堡垒机别名")
     p.add_argument("--via-mode", dest="via_mode", choices=["jump", "shell"], default="jump",
                    help="配合 --via:jump=标准 SSH 跳板(默认),shell=堡垒机")
     p.add_argument("--routing", choices=["username"], default=None,
-                   help="username=用户名路由型堡垒机(登录名自动拼 <user>/<目标IP>/any)")
+                   help="username：通过 <user>/<目标IP>/any 格式的登录名选择目标主机")
     p.add_argument("--staging", default=None,
-                   help="仅 `local` 段可用:文件传输经这台暂存主机换手(本机没开 `sshd` 时用)")
+                   help="仅用于 local：本机未运行 SSH 服务时，通过指定主机暂存文件")
     p = hsub.add_parser("remove", help="删除主机(不影响已建立的会话)")
     p.add_argument("alias")
 
@@ -1065,7 +1074,7 @@ def main():
             jump_connect(cp, h)
         else:
             ensure_daemon(args.alias, valid_session(args.session))
-            print(f"已建立会话链: {args.alias}(会话 {args.session})")
+            print(f"已建立终端会话: {args.alias}(会话 {args.session})")
 
     elif args.cmd == "push":
         h = check_alias(cp, args.alias)

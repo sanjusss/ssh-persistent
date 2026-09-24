@@ -1,41 +1,45 @@
-# `ssh-mux` 主机配置
-# 默认读取路径: ~/.config/ssh-mux/hosts.conf
-# 可用环境变量 `SSH_MUX_CONFIG` 指定其他路径
-# 增删主机建议用 `ssh-mux.py host add/remove`,本文件只是字段写法参考
+# `ssh-mux` 主机配置示例。以下地址、用户名和密码需要替换为实际信息。
+# 默认配置路径：~/.config/ssh-mux/hosts.conf
+# 可用环境变量 `SSH_MUX_CONFIG` 指定其他路径。
+# 建议通过 `python3 ssh-mux.py host add` 和 `host remove` 增删主机。
 #
-# 每台主机一段,段名即别名,命令行里用别名引用。字段说明:
-#   `host`      主机地址(必填)
-#   `port`      SSH 端口,默认 22
-#   `user`      登录用户名,默认当前本机用户
-#   `password`  登录密码,明文保存;不配则走密钥认证
-#   `via`       跳板/堡垒机别名,指向本文件里另一台主机
-#   `via_mode`  jump = 标准 SSH 跳板(支持 -J,默认);shell = 堡垒机(只给交互终端)
-#   `routing`   填 `username` 表示这是用户名路由型堡垒机:
-#               登录名自动拼成 <user>/<目标IP>/any,
-#               先过堡垒机密码,落地后再过目标机自己的 `login` 和 `password`
-#   `staging`   只用于 [local] 段:文件传输的暂存主机别名(本机没开 `sshd` 时用)
+# 每台主机占一个 [别名] 段，执行命令时使用这个别名。
+#   `host`      主机 IP 或域名，必填。
+#   `port`      SSH 端口，默认 22。
+#   `user`      登录用户名，默认使用本机当前用户。
+#   `password`  登录密码，以明文保存；不配置时使用密钥认证。
+#   `via`       通过哪台主机登录，填写本文件中已配置的主机别名。
+#   `via_mode`  `jump`：直连或支持 `ssh -J` 的标准跳板机，默认使用此模式。
+#               `shell`：通过堡垒机的交互式终端登录。
+#   `routing`   在堡垒机上填写 `username`，表示通过登录名指定目标 IP。
+#               脚本使用 `<user>/<目标IP>/any` 作为登录名，先填写堡垒机密码，
+#               再根据目标机的提示填写用户名和密码。
+#   `staging`   暂存主机的别名，仅用于 [local] 段。
 #
-# [local] 是保留段:文件传输(push/pull)需要经中转主机把文件传回本机,
-# `host` 要填中转主机能访问到本机的地址(不是 127.0.0.1)。
+# `shell` 模式传输文件需要 [local]；`jump` 模式不需要。
+# 如果本机运行了 `sshd`（接收 SSH 登录的服务），按下面填写本机信息。
+# 地址必须能被中转主机访问，不能填写 127.0.0.1。
 [local]
 host=1.1.1.1
 user=myuser
 password=mypass
 
-# 本机没开 `sshd` 时,上面那种配法不可用:中转机无法 `scp` 回本机。
-# 改用 `staging` 指定一台暂存主机(本机和链路最外层中转机都要能 ssh 到它),
-# 文件经它换手;此时 [local] 自己的 `host` 等字段不用配:
+# 如果本机没有运行 `sshd`，用下面的配置替换上面的 [local] 段。
+# 文件先传到暂存主机，再由接收方下载。
+# 本机和连接路径上的第一台中转主机都必须能通过 SSH 登录暂存主机。
+# 暂存主机必须使用 `jump` 模式，并配置 `password`。
+# 使用 `staging` 后，[local] 的 `host`、`user`、`password` 可以省略。
 # [local]
 # staging=jump
 
-# 堡垒机(用户名路由型)
+# 堡垒机：通过 `<账号>/<目标IP>/any` 格式的登录名选择目标服务器。
 [bastion]
 host=2.2.2.2
 user=T123456
 password=jump-pass
 routing=username
 
-# 主机 `A`:经堡垒机访问
+# 目标主机 `A`：通过 `bastion` 登录。
 [A]
 host=3.3.3.3
 user=root
@@ -43,7 +47,8 @@ password=a-pass
 via=bastion
 via_mode=shell
 
-# 主机 `B`:经 `A` 访问(`A` 可以用 `scp` 到 `B`)
+# 目标主机 `B`：先登录 `A`，再从 `A` 登录 `B`。
+# 传输文件时，`A` 也需要能通过 `scp` 访问 `B`。
 [B]
 host=4.4.4.4
 user=root
@@ -51,14 +56,14 @@ password=b-pass
 via=A
 via_mode=shell
 
-# 标准 SSH 跳板机示例(支持 -J)
+# 标准 SSH 跳板机：支持 `ssh -J`。
 [jump]
 host=5.5.5.5
 port=2222
 user=jump
 password=jump-pass
 
-# 经标准跳板访问的主机
+# 目标主机 `web`：通过 `jump` 登录。
 [web]
 host=6.6.6.6
 user=root
@@ -66,7 +71,7 @@ password=web-pass
 via=jump
 via_mode=jump
 
-# 直连主机示例(不配 `via`,走 `ControlMaster` 多路复用)
+# 直连主机 `db`：不填写 `via`，自动使用 `jump` 模式。
 [db]
 host=7.7.7.7
 user=root
