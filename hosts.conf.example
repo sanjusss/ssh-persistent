@@ -1,0 +1,66 @@
+# `ssh-mux` 主机配置
+# 默认读取路径: ~/.config/ssh-mux/hosts.conf
+# 可用环境变量 `SSH_MUX_CONFIG` 指定其他路径
+# 增删主机建议用 `ssh-mux.py host add/remove`,本文件只是字段写法参考
+#
+# 每台主机一段,段名即别名,命令行里用别名引用。字段说明:
+#   `host`      主机地址(必填)
+#   `port`      SSH 端口,默认 22
+#   `user`      登录用户名,默认当前本机用户
+#   `password`  登录密码,明文保存;不配则走密钥认证
+#   `via`       跳板/堡垒机别名,指向本文件里另一台主机
+#   `via_mode`  jump = 标准 SSH 跳板(支持 -J,默认);shell = 堡垒机(只给交互终端)
+#   `routing`   填 `username` 表示这是用户名路由型堡垒机:
+#               登录名自动拼成 <user>/<目标IP>/any,
+#               先过堡垒机密码,落地后再过目标机自己的 `login` 和 `password`
+#
+# [local] 是保留段:文件传输(push/pull)需要经中转主机把文件传回本机,
+# `host` 要填中转主机能访问到本机的地址(不是 127.0.0.1)。
+[local]
+host=1.1.1.1
+user=myuser
+password=mypass
+
+# 堡垒机(用户名路由型)
+[bastion]
+host=2.2.2.2
+user=T123456
+password=jump-pass
+routing=username
+
+# 主机 `A`:经堡垒机访问
+[A]
+host=3.3.3.3
+user=root
+password=a-pass
+via=bastion
+via_mode=shell
+
+# 主机 `B`:经 `A` 访问(`A` 可以用 `scp` 到 `B`)
+[B]
+host=4.4.4.4
+user=root
+password=b-pass
+via=A
+via_mode=shell
+
+# 标准 SSH 跳板机示例(支持 -J)
+[jump]
+host=5.5.5.5
+port=2222
+user=jump
+password=jump-pass
+
+# 经标准跳板访问的主机
+[web]
+host=6.6.6.6
+user=root
+password=web-pass
+via=jump
+via_mode=jump
+
+# 直连主机示例(不配 `via`,走 `ControlMaster` 多路复用)
+[db]
+host=7.7.7.7
+user=root
+password=db-pass

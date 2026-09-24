@@ -1,0 +1,10 @@
+# 真实主机配置(含明文密码),只提交 hosts.conf.example
+hosts.conf
+
+# python 缓存
+__pycache__/
+*.pyc
+
+# 运行期日志和错误文件
+*.log
+*.err
