@@ -15,6 +15,7 @@ import configparser
 import fcntl
 import glob
 import hashlib
+import importlib.util
 import json
 import os
 import pty
@@ -203,240 +204,17 @@ def build_shell_plan(cp, alias):
 
 # ---------- `shell` 模式:`pty` 会话 ----------
 
-class PtySession:
-    """保持从本机到目标的终端连接，支持登录、执行命令和重新连接"""
+# 独立模块也由远端执行器使用；按文件位置加载，允许从任意工作目录调用。
+_pty_spec = importlib.util.spec_from_file_location(
+    "ssh_mux_pty", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ssh_pty.py"))
+_pty_module = importlib.util.module_from_spec(_pty_spec)
+_pty_spec.loader.exec_module(_pty_module)
+PtySession = _pty_module.PtySession
 
-    def __init__(self, plan, log):
-        self.plan = plan
-        self.log = log
-        self.master = None
-        self.proc = None
-        self.buf = b""
-        self.control_socket = None
-        self.on_control = None
-
-    def _write(self, data):
-        while data:
-            n = os.write(self.master, data)
-            data = data[n:]
-
-    def _send_line(self, text):
-        self._write(text.encode() + b"\n")
-
-    def _pump(self, timeout):
-        readers = [self.master]
-        if self.control_socket is not None:
-            readers.append(self.control_socket)
-        r, _, _ = select.select(readers, [], [], timeout)
-        if self.control_socket is not None and self.control_socket in r:
-            self.on_control()
-        if self.master not in r:
-            return
-        try:
-            data = os.read(self.master, 65536)
-        except OSError:
-            data = b""
-        if not data:
-            raise ConnectionError("通道已关闭(对端退出或网络断开)")
-        if DEBUG_PTY:
-            self.log("pty>> " + repr(data[-2000:]))
-        self.buf += data
-        if len(self.buf) > 2_000_000:
-            # 标注必须保留:调用方只能看到末尾,不标注会误以为输出完整
-            note = "[ssh-mux: 输出超过 2MB,前面部分已丢弃,仅保留末尾]\n"
-            self.buf = b"\n" + note.encode() + b"\n" + self.buf[-1_000_000:]
-
-    def _wait_for(self, rx, timeout, extra=()):
-        """等待 `rx` 匹配输出末尾;`extra` 里的提示见到就自动应答"""
-        deadline = time.time() + timeout
-        while True:
-            if FAIL_RX.search(self.buf):
-                raise ConnectionError("登录失败,输出尾部: " + tail(self.buf))
-            if rx.search(self.buf):
-                return
-            for erx, ans in extra:
-                if erx.search(self.buf):
-                    self.buf = b""
-                    self._send_line(ans)
-                    break
-            remain = deadline - time.time()
-            if remain <= 0:
-                raise TimeoutError("等待登录提示超时,输出尾部: " + tail(self.buf))
-            try:
-                self._pump(min(remain, 1.0))
-            except ConnectionError as exc:
-                raise ConnectionError(f"通道关闭,输出尾部: {tail(self.buf)}") from exc
-
-    def _authenticate(self, auth):
-        for rx, secret in auth:
-            if not secret:
-                continue  # 无密码(如密钥认证),不等待该提示
-            self._wait_for(rx, AUTH_STEP_TIMEOUT, extra=[(YESNO_RX, "yes")])
-            self.buf = b""
-            self._send_line(secret)
-
-    def _settle(self):
-        """确认远程终端可以执行命令，然后关闭回显、提示符和颜色。
-        登录后远程主机可能清空输入缓冲，因此反复发送打印标记的命令，
-        直到收到标记。标记由 `printf` 拼接生成，输入命令中没有完整标记，
-        避免把终端回显误认为命令执行结果。
-        """
-        tok = rand_token()
-        rx = re.compile(rb"__RD_" + tok.encode() + rb"__")
-        deadline = time.time() + AUTH_STEP_TIMEOUT
-        self.buf = b""
-        while True:
-            self._send_line("stty -echo")
-            self._send_line(f"printf '__RD_%s__\\n' {tok}")
-            try:
-                self._wait_for(rx, 3)
-                break
-            except TimeoutError:
-                if time.time() > deadline:
-                    raise
-        self._send_line("PS1=''")
-        self._send_line("export TERM=dumb")
-        time.sleep(0.2)
-        self.buf = b""
-
-    def start(self):
-        args, auth = self.plan[0]
-        m, s = pty.openpty()
-        # 窗口调大,减少折行对输出解析的干扰
-        fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 220, 0, 0))
-        # 创建新会话，并将伪终端设为控制终端。SSH 通过 /dev/tty 读取密码。
-        # 没有控制终端时，SSH 会尝试调用 `ssh-askpass`，无法读取脚本发送的密码。
-        def _preexec():
-            os.setsid()
-            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-        self.proc = subprocess.Popen(args, stdin=s, stdout=s, stderr=s,
-                                     preexec_fn=_preexec, close_fds=True)
-        os.close(s)
-        self.master = m
-        try:
-            self._authenticate(auth)
-            self._settle()
-            for args, auth in self.plan[1:]:
-                # 替换中转 shell；内层 SSH 退出时整条终端链关闭，不能退回上一跳。
-                self._send_line("exec " + " ".join(shlex.quote(a) for a in args))
-                self._authenticate(auth)
-                self._settle()
-        except Exception:
-            self.close()
-            raise
-        self.log("已登录到目标主机")
-
-    def _stage_command(self, command, token, deadline):
-        """用短行传送命令文本，避开终端补全、输入缓冲和堡垒机多行处理。"""
-        name = "__ssh_mux_" + token
-        data = command.encode("utf-8")
-        for index, offset in enumerate(range(0, len(data), 256)):
-            # `printf %b` 识别八进制字节；末尾字符防止命令替换删除换行。
-            encoded = "".join("\\0%03o" % byte for byte in data[offset:offset + 256])
-            previous = "" if index == 0 else '"${' + name + '}"'
-            ack = f"{token}_{index}"
-            self.buf = b""
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                raise TimeoutError("传输命令内容超时，尚未执行命令")
-            self._send_line(f" {name}={previous}$(printf '%b_' '{encoded}'); "
-                            f"{name}=${{{name}%_}}; printf '__CH_%s__\\n' {ack}")
-            self._wait_for(re.compile(rb"__CH_" + ack.encode() + rb"__"), remaining)
-        return name
-
-    def exec(self, command, timeout, password=None):
-        """执行命令，用随机标记识别输出范围，返回 (输出, 退出码)。
-        命令和结束标记在同一条 shell 语句中解析；标记不会被程序当作输入。
-        `eval` 在当前 shell 执行，因此保留目录和环境变量。`password` 用于应答提示。
-        """
-        tok = rand_token()
-        if self.master is None:
-            # 上次超时后重建失败，会话不可用，先尝试重新登录
-            self.rebuild()
-        xs = f"__XS_{tok}__".encode()
-        xe = re.compile(rb"__XE_" + tok.encode() + rb"__(\d+)\r?\n")
-        deadline = time.time() + timeout
-        source = shlex.quote(command)
-        cleanup = ""
-        if "\n" in command or "\t" in command or len(source.encode()) > 2000:
-            try:
-                name = self._stage_command(command, tok, deadline)
-                if time.time() >= deadline:
-                    raise TimeoutError("传输命令内容超时，尚未执行命令")
-            except TimeoutError:
-                self.close()
-                raise TimeoutError("传输命令内容超时，尚未执行命令") from None
-            source = '"${' + name + '}"'
-            cleanup = "; unset " + name
-        self.buf = b""
-        self._send_line(f" printf '__XS_%s__\\n' {tok}; "
-                        f"eval {source}; "
-                        f"printf '__XE_%s__%s\\n' {tok} $?{cleanup}")
-        started = False
-        answers = 0
-        while True:
-            if not started:
-                i = self.buf.find(xs)
-                if i >= 0:
-                    started = True
-                    self.buf = self.buf[i + len(xs):]
-            if started:
-                m = xe.search(self.buf)
-                if m:
-                    return clean_output(self.buf[:m.start()]), int(m.group(1))
-                if password and answers < 3 and PW_RX.search(self.buf):
-                    # 密码提示:每次出现都要应答(最多 3 次)。ssh 每次尝试前
-                    # 会清空输入缓冲，因此后续重试也需要重新填写密码
-                    self.buf = b""
-                    self._send_line(password)
-                    answers += 1
-            remain = deadline - time.time()
-            if remain <= 0:
-                try:
-                    self._recover()
-                except ConnectionError:
-                    pass  # 恢复失败交给上层重建,这里统一报超时,避免误重发命令
-                raise TimeoutError(f"命令超过 {timeout} 秒未结束,已发送中断")
-            self._pump(min(remain, 0.5))
-
-    def _recover(self):
-        """命令超时后发送 `Ctrl-C`，再反复打印标记，确认终端恢复响应"""
-        try:
-            self._write(b"\x03")
-            time.sleep(0.3)
-            self.buf = b""
-            tok = rand_token()
-            rx = re.compile(rb"__RC_" + tok.encode() + rb"__")
-            deadline = time.time() + 8
-            while True:
-                self._send_line(f"printf '__RC_%s__\\n' {tok}")
-                try:
-                    self._wait_for(rx, 2)
-                    return
-                except TimeoutError:
-                    if time.time() > deadline:
-                        raise
-        except Exception as exc:
-            raise ConnectionError("会话无法恢复,需要重建") from exc
-
-    def rebuild(self):
-        self.close()
-        self.start()
-
-    def close(self):
-        try:
-            if self.proc and self.proc.poll() is None:
-                self.proc.kill()
-                self.proc.wait(timeout=5)
-        except Exception:
-            pass
-        try:
-            if self.master is not None:
-                os.close(self.master)
-        except OSError:
-            pass
-        self.master = None
-        self.proc = None
+_transfer_spec = importlib.util.spec_from_file_location(
+    "ssh_mux_transfer", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ssh_transfer.py"))
+_transfer_module = importlib.util.module_from_spec(_transfer_spec)
+_transfer_spec.loader.exec_module(_transfer_module)
 
 
 # ---------- `shell` 模式:守护进程 ----------
@@ -859,7 +637,7 @@ def scp_legacy_option(output):
     return [] if re.search(r"(?:unknown|illegal|invalid) option", output, re.I) else ["-O"]
 
 
-def jump_scp(cp, h, direction, src, dst):
+def jump_scp(cp, h, direction, src, dst, capture=False):
     global _LOCAL_SCP_LEGACY
     jump_connect(cp, h, quiet=True)
     if _LOCAL_SCP_LEGACY is None:
@@ -871,6 +649,8 @@ def jump_scp(cp, h, direction, src, dst):
     args = ["scp"] + _LOCAL_SCP_LEGACY + [
         "-q", "-o", f"ControlPath={jump_sock_file(cp, h)}", "-P", str(h.port)]
     args += [src, remote] if direction == "push" else [remote, dst]
+    if capture:
+        return subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True)
     return subprocess.run(args, stdin=subprocess.DEVNULL).returncode
 
 
@@ -903,8 +683,7 @@ def shell_exec(alias, session, command, timeout, password=None):
 
 def remote_spec(h, path):
     """转义远程 shell 特殊字符，同时保留 SCP 对返回文件名的校验。"""
-    escaped = re.sub(r"([^A-Za-z0-9_@%+=:,./-])", r"\\\1", path)
-    return f"{h.user}@{h.host}:{escaped}"
+    return _transfer_module.remote_spec(h.user, h.host, path)
 
 
 def scp_spec(h, path):
@@ -1312,6 +1091,84 @@ def run_exec_cli(argv):
     sys.exit(r["exit"])
 
 
+def transfer_file(cp, h, direction, src, dst, session, timeout, transport="scp"):
+    """选择传输方式，编码和文件校验由独立模块处理。"""
+    mode = host_mode(h)
+    if transport == "scp":
+        if mode == "jump":
+            return jump_scp(cp, h, direction, src, dst)
+        method = shell_push if direction == "push" else shell_pull
+        method(cp, h, valid_session(session), src, dst, timeout)
+        return 0
+    if transport == "stream" and mode != "jump":
+        die("stream 需要 jump 模式；堡垒机终端请使用 auto、base64 或 octal")
+    if mode == "shell":
+        session = valid_session(session)
+    elif transport == "auto":
+        transport = "stream"
+
+    spec = importlib.util.spec_from_file_location(
+        "ssh_mux_file_transfer", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ssh_transfer.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def ssh_args(command):
+        jump_connect(cp, h, quiet=True)
+        # 强制禁用终端和新的交互认证，数据不能混入认证提示。
+        return ["ssh", "-T", "-o", "BatchMode=yes", "-o", f"ControlPath={jump_sock_file(cp, h)}",
+                "-p", str(h.port), f"{h.user}@{h.host}", command]
+
+    def execute(command, limit):
+        if mode == "shell":
+            return shell_exec(h.alias, session, command, limit)
+        result = subprocess.run(ssh_args(command), stdin=subprocess.DEVNULL,
+                                capture_output=True, timeout=limit)
+        return {"exit": result.returncode,
+                "output": (result.stdout + result.stderr).decode("utf-8", "replace").replace("\r", "")}
+
+    def stream(action, path, file, limit):
+        quoted = shlex.quote(path)
+        if action == "push":
+            command = f"umask 077; cat > {quoted}"
+            stdin, stdout = file, subprocess.DEVNULL
+        else:
+            command = f"test -f {quoted} && test ! -L {quoted} && cat < {quoted}"
+            stdin, stdout = subprocess.DEVNULL, file
+        result = subprocess.run(ssh_args(command), stdin=stdin, stdout=stdout,
+                                stderr=subprocess.PIPE, timeout=limit)
+        if result.returncode != 0:
+            detail = result.stderr.decode("utf-8", "replace").strip()[-300:]
+            raise module.TransferError(f"SSH 文件流传输失败（退出码 {result.returncode}）: {detail}")
+
+    try:
+        worker = module.Transfer(execute, stream, timeout)
+        method = worker.push if direction == "push" else worker.pull
+        path = method(src, dst, transport)
+    except (module.TransferError, OSError, subprocess.TimeoutExpired) as exc:
+        die(str(exc))
+    print(f"{'已上传' if direction == 'push' else '已下载'}: {path}（长度和 SHA-256 校验通过）")
+    return 0
+
+
+def run_hybrid(cp, host, args):
+    spec = importlib.util.spec_from_file_location(
+        "ssh_mux_hybrid", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ssh_hybrid.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    src, dst = ((args.local_path, args.remote_path) if args.cmd == "push" else
+                (args.remote_path, args.local_path))
+    try:
+        # 直接传递当前模块对象，支持脚本执行和 importlib 加载两种入口。
+        import types
+        facade = types.SimpleNamespace(**globals())
+        return module.Coordinator(facade, cp, host, args.cmd, src, dst,
+                                  args.timeout, args.leg, args.plan).run()
+    except (module.TransferError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        die(str(exc))
+    except KeyboardInterrupt:
+        die("混合传输已取消；请检查上方的残留任务提示")
+
+
 def main():
     if len(sys.argv) >= 4 and sys.argv[1] == "_daemon":
         daemon_main(sys.argv[2], sys.argv[3])
@@ -1350,6 +1207,10 @@ def main():
     p.add_argument("--timeout", type=int, default=XFER_TIMEOUT)
     p.add_argument("local_path")
     p.add_argument("remote_path")
+    p.add_argument("--transport", choices=["auto", "scp", "stream", "base64", "octal", "hybrid"], default="scp",
+                   help="默认 scp：保留原有方式；auto 在 jump 使用 SSH 文件流，在 shell 自动选择编码")
+    p.add_argument("--leg", action="append", default=[], help="hybrid 分段协议，例如 @local:A=base64 或 A:B=scp")
+    p.add_argument("--plan", action="store_true", help="探测并显示 hybrid 计划，不传输用户文件")
 
     p = sub.add_parser("pull", allow_abbrev=False, help="从远程主机下载文件")
     p.add_argument("alias")
@@ -1357,6 +1218,10 @@ def main():
     p.add_argument("--timeout", type=int, default=XFER_TIMEOUT)
     p.add_argument("remote_path")
     p.add_argument("local_path")
+    p.add_argument("--transport", choices=["auto", "scp", "stream", "base64", "octal", "hybrid"], default="scp",
+                   help="默认 scp：保留原有方式；auto 在 jump 使用 SSH 文件流，在 shell 自动选择编码")
+    p.add_argument("--leg", action="append", default=[], help="hybrid 分段协议，例如 @local:A=base64 或 A:B=scp")
+    p.add_argument("--plan", action="store_true", help="探测并显示 hybrid 计划，不传输用户文件")
 
     sub.add_parser("status", allow_abbrev=False, help="查看所有主机的连接状态")
     sub.add_parser("list", allow_abbrev=False, help="列出配置中的所有主机")
@@ -1388,6 +1253,9 @@ def main():
 
     args = ap.parse_args()
 
+    if args.cmd in ("push", "pull") and (args.leg or args.plan) and args.transport != "hybrid":
+        ap.error("--leg 和 --plan 需要 --transport hybrid")
+
     if args.cmd == "host":
         # 增删主机只动配置文件;文件可能还不存在,不走 `load_config`
         if args.host_cmd == "add":
@@ -1408,15 +1276,17 @@ def main():
 
     elif args.cmd == "push":
         h = check_alias(cp, args.alias)
-        if host_mode(h) == "jump":
-            sys.exit(jump_scp(cp, h, "push", args.local_path, args.remote_path))
-        shell_push(cp, h, valid_session(args.session), args.local_path, args.remote_path, args.timeout)
+        if args.transport == "hybrid":
+            sys.exit(run_hybrid(cp, h, args))
+        sys.exit(transfer_file(cp, h, "push", args.local_path, args.remote_path,
+                               args.session, args.timeout, args.transport))
 
     elif args.cmd == "pull":
         h = check_alias(cp, args.alias)
-        if host_mode(h) == "jump":
-            sys.exit(jump_scp(cp, h, "pull", args.remote_path, args.local_path))
-        shell_pull(cp, h, valid_session(args.session), args.remote_path, args.local_path, args.timeout)
+        if args.transport == "hybrid":
+            sys.exit(run_hybrid(cp, h, args))
+        sys.exit(transfer_file(cp, h, "pull", args.remote_path, args.local_path,
+                               args.session, args.timeout, args.transport))
 
     elif args.cmd == "status":
         cmd_status(cp)

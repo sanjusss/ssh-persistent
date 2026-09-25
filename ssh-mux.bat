@@ -19,9 +19,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
-wsl.exe -e bash -c "command -v python3 >/dev/null && command -v ssh >/dev/null && command -v scp >/dev/null" >nul 2>&1
+wsl.exe -e bash -c "command -v python3 >/dev/null && command -v ssh >/dev/null" >nul 2>&1
 if errorlevel 1 (
-    echo ssh-mux: missing python3/ssh/scp inside WSL. Install them first, e.g.:
+    echo ssh-mux: missing python3/ssh inside WSL. Install them first, e.g.:
     echo   wsl -u root -- apt-get install -y python3 openssh-client
     exit /b 1
 )
@@ -80,6 +80,8 @@ if "%ENDOPTS%"=="1" goto positional
 if "%CUR%"=="--" goto endoptions
 if "%CUR%"=="--session" goto valuedoption
 if "%CUR%"=="--timeout" goto valuedoption
+if "%CUR%"=="--transport" goto valuedoption
+if "%CUR%"=="--leg" goto valuedoption
 if "%CUR:~0,1%"=="-" goto append
 :positional
 set /a POSITION+=1 >nul

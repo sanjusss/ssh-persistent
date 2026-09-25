@@ -6,7 +6,7 @@
 
 ## 安装与快速开始
 
-需要 Linux 或 `macOS`、Python 3.7 或更新版本，以及 `ssh`、`scp` 命令。脚本只使用 Python 标准库，无需安装 Python 依赖包。所有系统都可以通过 `ssh-mux.sh` 调用：`Windows` 的 `bash` 环境（`Git Bash` 等）会自动经 `WSL` 运行；`Windows` 没有 `bash` 时（`PowerShell`/`cmd`）改用 `ssh-mux.bat`，准备步骤见 [Windows 运行说明](references/windows.md)。
+需要 Linux 或 `macOS`、Python 3.7 或更新版本，以及 `ssh` 命令；默认文件传输还需要 `scp`，使用 `--transport auto` 等新方式时可省略。脚本只使用 Python 标准库，无需安装 Python 依赖包。所有系统都可以通过 `ssh-mux.sh` 调用：`Windows` 的 `bash` 环境（`Git Bash` 等）会自动经 `WSL` 运行；`Windows` 没有 `bash` 时（`PowerShell`/`cmd`）改用 `ssh-mux.bat`，准备步骤见 [Windows 运行说明](references/windows.md)。
 
 下面演示直接连接服务器。`jump` 模式使用密码登录时，本机还需要 `sshpass`，用于自动填写密码；使用密钥登录时，省略 `--password`。
 
@@ -30,6 +30,10 @@ $S exit db
 
 复杂命令可先保存为本地 `UTF-8` 文件，再运行 `$S exec db --file ./check.sh`，减少调用时的引号和转义。示例见 [从本地文件执行复杂命令](SKILL.md#从本地文件执行复杂命令)。
 
+`push`、`pull` 默认仍使用 `scp`。显式指定 `--transport auto` 后，直连使用 SSH 二进制流，堡垒机使用分块编码，并校验文件长度与 `SHA-256`。也可用 `--transport base64`、`--transport octal` 指定编码，详见[文件传输](references/transfers.md)。
+
+多级跳板可以显式使用 `--transport hybrid`，并用 `--leg A:B=scp` 等参数指定各段方式。工具在内网主机上部署临时执行器，让文件直接传到下一跳，详见[混合传输](references/hybrid-transfers.md)。
+
 ## 作为技能安装
 
 把整个目录放到 `~/.agents/skills/ssh-persistent/`，或项目的 `.agents/skills/ssh-persistent/` 下，供支持此技能目录的助手使用。技能入口为 [SKILL.md](SKILL.md)。
@@ -48,11 +52,11 @@ $S exit db
 
 ## 文件说明
 
-`SKILL.md` 保存常用操作和关键约束，`references/` 保存按场景读取的详细说明，`hosts.conf.example` 说明配置字段。`ssh-mux.py` 执行具体操作，`ssh-mux.sh` 和 `ssh-mux.bat` 负责环境检查和路径转换。运行脚本位于技能根目录，回归测试放在 `tests/` 中。
+`SKILL.md` 保存常用操作和关键约束，`references/` 保存按场景读取的详细说明，`hosts.conf.example` 说明配置字段。`ssh-mux.py` 管理连接与命令，`ssh_transfer.py` 实现无需 `scp` 的文件传输。`ssh_hybrid.py` 和 `ssh_worker.py` 分别负责混合传输调度与远端执行，`ssh_pty.py` 提供共用终端控制。`ssh-mux.sh` 和 `ssh-mux.bat` 负责环境检查和路径转换。运行脚本位于技能根目录，回归测试放在 `tests/` 中。
 
 ## 本地测试
 
-运行 `python3 -m unittest discover -s tests -v`。测试使用临时目录、本地 Bash 和 `scp` 进程，不读取真实主机配置或连接远程服务器。Windows 路径转换使用模拟程序验证；批处理脚本仍需在真实 Windows 环境验证。
+运行 `python3 -m unittest discover -s tests -v`。测试使用临时目录、本地 shell 和模拟连接；旧传输测试使用本机 `scp`，新传输测试使用不含 `scp` 的工具路径。测试不读取真实主机配置或连接远程服务器。Windows 路径转换使用模拟程序验证；批处理脚本仍需在真实 Windows 环境验证。
 
 ## 许可证
 

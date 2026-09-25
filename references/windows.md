@@ -16,6 +16,8 @@ wsl --install -d Ubuntu --no-launch
 wsl -u root -- bash -c 'apt-get update && apt-get install -y openssh-client sshpass'
 ```
 
+启动器检查 `python3` 和 `ssh`，不再要求 `scp`。`push`、`pull` 默认仍使用 `scp`；无此工具时需显式指定 `--transport auto` 等新方式，`--transport` 选项与 Linux 相同。
+
 ## 调用方式
 
 `Git Bash`、`MSYS2`、`Cygwin` 等 `bash` 环境下与其他系统一致，使用 `ssh-mux.sh`。它会自动检查 `WSL`、发行版和依赖，把本地文件路径映射为 `WSL` 路径（相对路径、`C:\...`、`/tmp/...` 形式均可），再经 `WSL` 运行：

@@ -11,7 +11,7 @@ description: 通过 SSH 长连接排查远程服务器，适合需要多次执�
 
 ## 运行环境与连接方式
 
-Linux 和 `macOS` 需要 Python 3.7 或更新版本，以及 `ssh`、`scp`。脚本只使用 Python 标准库。`jump` 模式使用密码认证时，本机还需要 `sshpass`；使用密钥时省略密码配置。
+Linux 和 `macOS` 需要 Python 3.7 或更新版本，以及 `ssh`；默认文件传输需要 `scp`，使用 `--transport auto` 等新方式时可省略。脚本只使用 Python 标准库。`jump` 模式使用密码认证时，本机还需要 `sshpass`；使用密钥时省略密码配置。
 
 `Windows` 经 `WSL` 运行：有 `bash` 时使用 `ssh-mux.sh`，否则使用 `ssh-mux.bat`。在 `Windows` 上操作前，先读 [Windows 运行说明](references/windows.md)。
 
@@ -57,7 +57,7 @@ S=/path/to/ssh-persistent/ssh-mux.sh
 
 将完整命令文本作为一个参数传入。直接写 `exec A awk '{print $1}' 文件` 会在本地丢失程序外层引号；复杂命令优先使用下面的 `--file`。需要直接传入 `awk` 命令时，见[命令引号](references/troubleshooting.md#命令引号)。
 
-`shell` 模式执行命令默认超时为 120 秒，上限为 7200 秒，超过上限会被截断。`jump` 模式忽略 `--session` 和 `--timeout`；传输超时的含义见[文件传输](references/transfers.md)。
+`shell` 模式执行命令默认超时为 120 秒，上限为 7200 秒，超过上限会被截断。`jump` 模式执行命令时忽略 `--session` 和 `--timeout`；传输超时的含义见[文件传输](references/transfers.md)。
 
 ### 从本地文件执行复杂命令
 

@@ -32,9 +32,9 @@ MINGW*|MSYS*|CYGWIN*)
     wsl.exe -e true >/dev/null 2>&1 \
         || die "WSL 中没有已安装的 Linux 发行版,需要先安装(步骤见 SKILL.md;安装前需征得用户同意)"
     if ! miss=$(wsl.exe -e bash -c \
-        'for c in python3 ssh scp; do command -v $c >/dev/null || exit 1; done
+        'for c in python3 ssh; do command -v $c >/dev/null || exit 1; done
          command -v sshpass >/dev/null || echo SSHMUX-NO-SSHPASS' 2>/dev/null); then
-        die "WSL 内缺少 python3/ssh/scp(或发行版没有 bash),请用 Ubuntu,或执行:wsl -u root -- apt-get install -y python3 openssh-client"
+        die "WSL 内缺少 python3/ssh(或发行版没有 bash),请用 Ubuntu,或执行:wsl -u root -- apt-get install -y python3 openssh-client"
     fi
     # bash 启动文件可能向 stdout 打印内容,标记带独特前缀并用通配判断,避免误判
     case $miss in
@@ -124,7 +124,7 @@ MINGW*|MSYS*|CYGWIN*)
             if [ "$nopt" -eq 0 ]; then
                 case "$arg" in
                 --) nopt=1; set -- "$@" "$arg"; continue ;;
-                --session|--timeout)
+                --session|--timeout|--transport|--leg)
                     # 带值选项清单需与 ssh-mux.py push/pull 的 argparse 带值选项保持同步
                     if [ "$seen" -ge "$total" ]; then
                         die "$arg 需要一个参数值"

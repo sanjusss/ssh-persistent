@@ -121,6 +121,20 @@ elif len(args) > 2 and args[:2] == ['-e', 'python3'] and args[2] != '-c':
             ["push", "db", "--", "/drives/c/work area/-input.txt", "--timeout"],
         )
 
+    def test_transport_option_preserves_path_positions(self):
+        self.assertEqual(
+            self.forwarded("push", "--transport", "base64", "db", r".\file", "/tmp/"),
+            ["push", "--transport", "base64", "db", "/drives/c/work area/file", "/tmp/"],
+        )
+        self.assertEqual(
+            self.forwarded("push", "--transport", "hybrid", "--leg", "A:B=base64", "db", r".\file", "/tmp/", "--plan"),
+            ["push", "--transport", "hybrid", "--leg", "A:B=base64", "db", "/drives/c/work area/file", "/tmp/", "--plan"],
+        )
+        self.assertEqual(
+            self.forwarded("pull", "db", "--transport=octal", "/tmp/file", r".\file"),
+            ["pull", "db", "--transport=octal", "/tmp/file", "/drives/c/work area/file"],
+        )
+
     def test_mapping_failure_stops_before_python(self):
         result = self.launch("push", "db", "fail-mapping", "/tmp/")
         self.assertNotEqual(result.returncode, 0)
