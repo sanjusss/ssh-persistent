@@ -13,6 +13,9 @@ __pycache__/
 *.sock
 *.pid
 
+# 用户私有运行目录，包含控制接口、文件锁及无扩展名的 SSH 套接字
+ssh-mux-[0-9]*/
+
 # 桌面系统生成的文件
 .DS_Store
 Thumbs.db

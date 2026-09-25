@@ -46,20 +46,65 @@ MINGW*|MSYS*|CYGWIN*)
     wsl.exe -e python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)' 2>/dev/null \
         || die "WSL 内 Python 版本低于 3.7,请升级后再使用"
 
-    # C:\x\y 或 C:/x/y -> /mnt/c/x/y(盘符必须小写,实测 /mnt/C 不可用)
+    # 先按当前 Windows 目录解析相对路径,再让 WSL 按实际挂载位置转换。
     to_wsl() {
-        _d=${1%%:*}
-        _r=${1#*:}
-        _d=$(printf '%s' "$_d" | tr 'A-Z' 'a-z')
-        _r=$(printf '%s' "$_r" | tr '\\' '/')
-        printf '/mnt/%s%s' "$_d" "$_r"
+        case $1 in
+        \\\\*|//*) die "不支持网络路径($1),请先把文件放到本地磁盘再传输" ;;
+        esac
+        _win=$(cygpath -aw -- "$1") || die "无法解析本地路径($1)"
+        case $_win in
+        \\\\*|//*) die "不支持网络路径($_win),请先把文件放到本地磁盘再传输" ;;
+        esac
+        # 用正斜杠避免 Windows 命令行把末尾反斜杠和闭合引号合并。
+        _win=$(printf '%s' "$_win" | tr '\\' '/')
+        _mapped=$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+            wsl.exe -e wslpath -a "$_win") || die "无法转换为 WSL 路径($1)"
+        [ -n "$_mapped" ] || die "无法转换为 WSL 路径($1)"
+        printf '%s' "$_mapped"
     }
-    PYWIN=$(cygpath -w "$DIR/ssh-mux.py")
-    # 仓库在 UNC 网络路径上时 cygpath 给出 \\server\share 形状,to_wsl 无法转换
-    case $PYWIN in
-    \\\\*|//*) die "仓库位于网络路径($PYWIN),WSL 无法访问,请把仓库放到本地磁盘" ;;
-    esac
-    WSLPY=$(to_wsl "$PYWIN")
+    WSLPY=$(to_wsl "$DIR/ssh-mux.py") || exit 1
+
+    if [ "$1" = "exec" ]; then
+        # 只转换命令开始前的 --file/-f；远程命令中的同名参数原样传递。
+        total=$#
+        seen=1
+        gotalias=0
+        command_started=0
+        set -- "$@" "$1"
+        shift
+        while [ "$seen" -lt "$total" ]; do
+            arg=$1; shift; seen=$((seen + 1))
+            if [ "$command_started" -eq 0 ]; then
+                case "$arg" in
+                --) command_started=1 ;;
+                --file|-f|--session|--timeout)
+                    [ "$seen" -lt "$total" ] || die "$arg 需要一个参数值"
+                    val=$1; shift; seen=$((seen + 1))
+                    case "$arg" in
+                    --file|-f)
+                        if [ "$val" != "-" ]; then val=$(to_wsl "$val") || exit 1; fi
+                        ;;
+                    esac
+                    set -- "$@" "$arg" "$val"
+                    continue
+                    ;;
+                --file=*)
+                    val=${arg#--file=}
+                    if [ "$val" != "-" ]; then val=$(to_wsl "$val") || exit 1; fi
+                    arg=--file=$val
+                    ;;
+                --session=*|--timeout=*) ;;
+                -h|--help)
+                    if [ "$gotalias" -eq 1 ]; then command_started=1; fi
+                    ;;
+                *)
+                    if [ "$gotalias" -eq 0 ]; then gotalias=1; else command_started=1; fi
+                    ;;
+                esac
+            fi
+            set -- "$@" "$arg"
+        done
+    fi
 
     if [ "$1" = "push" ] || [ "$1" = "pull" ]; then
         # push <别名> [选项] <本地路径> <远程路径>;pull 的两个路径顺序相反。
@@ -98,11 +143,7 @@ MINGW*|MSYS*|CYGWIN*)
             fi
             pathpos=$((pathpos + 1))
             if [ "$pathpos" -eq "$loc" ]; then
-                case "$arg" in /*) arg=$(cygpath -w "$arg") ;; esac
-                case $arg in
-                \\\\*|//*) die "不支持网络路径($arg),请先把文件放到本地磁盘再传输" ;;
-                [a-zA-Z]:*) arg=$(to_wsl "$arg") ;;
-                esac
+                arg=$(to_wsl "$arg") || exit 1
             fi
             set -- "$@" "$arg"
         done

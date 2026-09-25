@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions DisableDelayedExpansion
 
 rem Windows launcher for ssh-mux: check WSL and dependencies, map paths into
 rem WSL, then run ssh-mux.py inside WSL. Keep this file ASCII only: non-UTF8
@@ -49,47 +49,119 @@ if not defined WSLPY (
     exit /b 1
 )
 
-rem Other subcommands pass their arguments through untouched with %*: a
-rem rebuild loop would mangle arguments containing %% (double expansion).
-rem Only push/pull need path mapping: their local file argument is written
-rem as a drive-letter path. Mapping by shape (second char is ":") is safe
-rem here because push/pull take no other drive-letter-looking values.
-rem Case-sensitive on purpose: ssh-mux.py's argparse only accepts lowercase
-rem push/pull, so accepting PUSH here would just fail later with invalid choice.
+rem Other subcommands preserve their original command line with %*.
+rem Map push/pull local paths and exec --file, preserving inline commands.
+set "EXECMODE=0"
+if "%~1"=="exec" goto execmode
 if "%~1"=="push" goto rebuild
 if "%~1"=="pull" goto rebuild
+:original
 wsl.exe -e python3 "%WSLPY%" %*
 exit /b %errorlevel%
 
-rem Rebuild loop for push/pull. Flow uses goto and no CALL: CALL re-parses
-rem the rebuilt command line and expands %% sequences a second time. Flow
-rem also avoids parenthesized blocks around set/if: inside a block, %VAR%
-rem expands at parse time (before set runs).
+rem Avoid CALL and parenthesized blocks while rebuilding arguments.
+:execmode
+set "EXECMODE=1"
 :rebuild
-set ARGS=
+set ARGS="%~1"
+set "LOCALPOS=2"
+if "%~1"=="pull" set "LOCALPOS=3"
+set "POSITION=0"
+set "ENDOPTS=0"
+set "OPTVAL=0"
+shift
 :parse
-rem [%1] instead of "%~1": an explicitly passed empty argument ("") must not
-rem be mistaken for the end of the argument list. %1 keeps its quotes, so it
-rem only expands to nothing after the last argument was shifted away.
+rem Keep an explicitly empty argument distinct from the end of the list.
 if [%1]==[] goto run
 set "CUR=%~1"
+if "%EXECMODE%"=="1" goto execarg
+if "%OPTVAL%"=="1" goto optionvalue
+if "%ENDOPTS%"=="1" goto positional
+if "%CUR%"=="--" goto endoptions
+if "%CUR%"=="--session" goto valuedoption
+if "%CUR%"=="--timeout" goto valuedoption
+if "%CUR:~0,1%"=="-" goto append
+:positional
+set /a POSITION+=1 >nul
+if not "%POSITION%"=="%LOCALPOS%" goto append
 if not defined CUR goto append
-rem A trailing backslash would escape the closing quote when wsl.exe parses
-rem its command line; it adds nothing for scp, so strip it first.
-:strip
-if "%CUR:~-1%"=="\" (set "CUR=%CUR:~0,-1%" & goto strip)
-set "C2=%CUR:~1,1%"
-if not "%C2%"==":" goto append
-rem Compare against the stripped value: ORIG must match what wslpath was
-rem given, otherwise a stripped trailing backslash would hide a failed mapping.
-set "ORIG=%CUR%"
-for /f "usebackq delims=" %%w in (`wsl.exe -e wslpath -a "%CUR%" 2^>nul`) do set "CUR=%%w"
-if "%CUR%"=="%ORIG%" echo ssh-mux: warning: cannot map "%ORIG%" to a WSL path, passing it unchanged
+rem Resolve Windows relative paths before WSL sees their backslashes.
+set "LOCAL=%~f1"
+if "%LOCAL:~0,2%"=="\\" goto uncpath
+if "%LOCAL:~0,2%"=="//" goto uncpath
+rem Forward slashes also preserve drive roots when passed to wsl.exe.
+set "LOCAL=%LOCAL:\=/%"
+set "MAPPED="
+for /f "usebackq delims=" %%w in (`wsl.exe -e wslpath -a "%LOCAL%" 2^>nul`) do set "MAPPED=%%w"
+if not defined MAPPED goto badpath
+set "CUR=%MAPPED%"
+goto append
+rem exec keeps inline commands unchanged using the original %* command line.
+:execarg
+if "%OPTVAL%"=="file" goto execfilevalue
+if "%OPTVAL%"=="1" goto optionvalue
+if "%ENDOPTS%"=="1" goto original
+if "%CUR%"=="--" goto endoptions
+if "%CUR%"=="--file" goto fileoption
+if "%CUR%"=="-f" goto fileoption
+if "%CUR:~0,7%"=="--file=" goto inlinefile
+if "%CUR%"=="--session" goto valuedoption
+if "%CUR%"=="--timeout" goto valuedoption
+if "%CUR:~0,10%"=="--session=" goto append
+if "%CUR:~0,10%"=="--timeout=" goto append
+if "%CUR%"=="--help" goto original
+if "%CUR%"=="-h" goto original
+if "%POSITION%"=="1" goto original
+set "POSITION=1"
+goto append
+:fileoption
+set "OPTVAL=file"
+goto append
+:inlinefile
+set ARGS=%ARGS% "--file"
+set "CUR=%CUR:~7%"
+:execfilevalue
+set "OPTVAL=0"
+if "%CUR%"=="-" goto append
+if not defined CUR goto append
+for %%f in ("%CUR%") do set "LOCAL=%%~ff"
+if "%LOCAL:~0,2%"=="\\" goto uncpath
+if "%LOCAL:~0,2%"=="//" goto uncpath
+set "LOCAL=%LOCAL:\=/%"
+set "MAPPED="
+for /f "usebackq delims=" %%w in (`wsl.exe -e wslpath -a "%LOCAL%" 2^>nul`) do set "MAPPED=%%w"
+if not defined MAPPED goto badpath
+set "CUR=%MAPPED%"
+goto append
+:optionvalue
+set "OPTVAL=0"
+goto append
+:endoptions
+set "ENDOPTS=1"
+goto append
+:valuedoption
+set "OPTVAL=1"
 :append
-set ARGS=%ARGS% "%CUR%"
+rem Double trailing backslashes for Windows argv parsing, without changing
+rem the value received by WSL (including remote paths and option values).
+set "TAIL=%CUR%"
+set "SLASHES="
+:quotetail
+if not "%TAIL:~-1%"=="\" goto quoted
+set "SLASHES=%SLASHES%\"
+set "TAIL=%TAIL:~0,-1%"
+goto quotetail
+:quoted
+set ARGS=%ARGS% "%CUR%%SLASHES%"
 shift
 goto parse
 
+:uncpath
+echo ssh-mux: network paths are not supported; use a local drive path. >&2
+exit /b 1
+:badpath
+echo ssh-mux: cannot map local path "%LOCAL%" to WSL. >&2
+exit /b 1
 :run
 wsl.exe -e python3 "%WSLPY%" %ARGS%
 exit /b %errorlevel%

@@ -5,207 +5,101 @@ description: 通过 SSH 长连接排查远程服务器，适合需要多次执�
 
 # SSH 长连接管理
 
-通过同目录的 `ssh-mux.sh` 连接服务器、执行命令和传输文件（内部调用 `ssh-mux.py`；`Windows` 没有 `bash` 时改用 `ssh-mux.bat`）。主机地址、端口及登录信息保存在配置文件中，执行命令时引用主机别名。首次登录后，后续操作继续使用已有连接。
+通过本目录的 `ssh-mux.sh` 连接服务器、执行命令和传输文件，内部调用 `ssh-mux.py`。执行时使用配置中的主机别名，后续操作继续使用已建立的连接。
 
-适用于远程排查、巡检、日志收集，以及通过跳板机或堡垒机访问内网主机。只执行一次命令时，无需使用本工具。目标主机必须能通过 SSH 访问。
+适用于需要多次操作的远程排查、巡检和日志收集。只执行一次命令时无需使用本工具，目标主机必须能通过 SSH 访问。
 
 ## 运行环境与连接方式
 
-本工具支持 Linux 和 `macOS`。原生 `Windows` 请在 `WSL`（`Windows` 的 Linux 子系统）中运行。脚本依赖 Unix 终端接口，`Windows` 版 `OpenSSH` 也不支持这里使用的连接复用功能。
+Linux 和 `macOS` 需要 Python 3.7 或更新版本，以及 `ssh`、`scp`。脚本只使用 Python 标准库。`jump` 模式使用密码认证时，本机还需要 `sshpass`；使用密钥时省略密码配置。
 
-所有系统统一用 `ssh-mux.sh` 调用：Linux/`macOS` 直接使用本机 Python；`Windows` 的 `bash`（`Git Bash`、`MSYS2`、`Cygwin`）自动经 `WSL` 运行，并完成环境检查和本地路径转换。`Windows` 没有 `bash` 时（`PowerShell`/`cmd`），改用功能相同的 `ssh-mux.bat`。
+`Windows` 经 `WSL` 运行：有 `bash` 时使用 `ssh-mux.sh`，否则使用 `ssh-mux.bat`。在 `Windows` 上操作前，先读 [Windows 运行说明](references/windows.md)。
 
-本机需要 Python 3.7 或更新版本，以及 `ssh` 和 `scp`。脚本只使用 Python 标准库；`scp` 负责传输文件。`jump` 模式使用密码登录时，本机还需要 `sshpass`，用于自动填写密码。
+| 模式 | 使用场景 |
+| --- | --- |
+| `jump` | 直连，或支持 `ssh -J` 的标准跳板机；通过 SSH 的连接复用功能保持连接。 |
+| `shell` | 只允许交互式登录的堡垒机；后台进程保持终端，并逐层登录目标主机。 |
 
-### `Windows`：准备 `WSL` 环境
+没有 `via` 时使用 `jump`；配置 `via` 后由 `via_mode` 指定，默认仍为 `jump`。
 
-以下命令在 `Windows` 终端（如 `PowerShell`）中执行。安装 `WSL` 属于系统级变更：会启用系统组件、下载发行版镜像并占用约 2 `GB` 磁盘空间。**必须先向用户说明这些影响并取得显式同意，才能安装**。执行前先用 `wsl -l -v` 检查，已有可用发行版时直接使用，不要重复安装。
+## 按需读取引用文档
 
-```bash
-# 安装 Ubuntu；--no-launch 跳过首次启动的交互式初始化，之后直接以 root 使用
-wsl --install -d Ubuntu --no-launch
+仅在任务涉及对应场景时读取，不必预先加载全部文档。
 
-# 在 WSL 内安装依赖；python3 已随 Ubuntu 自带
-wsl -u root -- bash -c 'apt-get update && apt-get install -y openssh-client sshpass'
-```
+| 何时读取 | 文档 |
+| --- | --- |
+| 使用 `Windows`、准备 `WSL` 或处理路径转换 | [Windows 运行说明](references/windows.md) |
+| 新增或删除主机、配置跳板机和堡垒机 | [主机与连接配置](references/connections.md) |
+| 上传、下载文件或配置暂存主机 | [文件传输](references/transfers.md) |
+| 连接失败、会话无响应，或调整环境变量 | [连接排查与运行机制](references/troubleshooting.md) |
+| 手动编辑配置、查询字段含义 | [hosts.conf.example](hosts.conf.example) |
 
-### `Windows`：调用方式
-
-`Git Bash`、`MSYS2`、`Cygwin` 等 `bash` 环境下与其他系统一致，使用 `ssh-mux.sh`。它会自动检查 `WSL`、发行版和依赖，把本地文件路径映射为 `WSL` 路径（相对路径、`C:\...`、`/tmp/...` 形式均可），再经 `WSL` 运行：
-
-```bash
-./ssh-mux.sh exec db "hostname && uptime"
-./ssh-mux.sh push db ./app.tar.gz /tmp/
-```
-
-没有 `bash` 时（`PowerShell`/`cmd`），直接运行功能相同的 `ssh-mux.bat`：
-
-```bat
-ssh-mux.bat exec db "hostname && uptime"
-```
-
-远程路径原样传递；本地相对路径基于当前目录解析，当前目录在网络路径上时请改用绝对路径。配置文件保存在 `WSL` 内的默认路径（`~/.config/ssh-mux/hosts.conf`），无需设置环境变量。在 `Windows` 侧设置的环境变量（如 `SSH_MUX_CONFIG`）不会自动传入 `WSL`，需要经 `WSLENV`（`Windows` 与 `WSL` 之间转发环境变量的机制）转发后才生效；脚本在 `WSL` 内运行，一般无需设置这些变量。脚本所在目录以及 `push`/`pull` 的文件参数不支持 `//` 开头的网络共享路径（即 `Windows` 的 `UNC` 路径，形如 `\\服务器\共享名`，在 `WSL` 中显示为 `//服务器/共享名`）。使用这类路径时脚本会直接报错，请改用本地路径。长连接和守护进程运行在 `WSL` 内，空闲超时和断开行为与 Linux 一致。
-
-脚本根据目标主机的配置选择连接方式：
-
-| 模式 | 适用情况 | 连接方式 |
-| --- | --- | --- |
-| `jump` | 直连，或经过支持 `ssh -J` 的标准跳板机 | 使用 `ControlMaster`，即 SSH 提供的连接复用功能。后续命令共用已建立的连接。 |
-| `shell` | 堡垒机只允许交互式登录，不支持 `ssh -J` 或直接执行远程命令 | 后台进程保持登录终端，依次登录中转主机和目标主机，再向终端发送命令。 |
-
-没有配置 `via` 时使用 `jump` 模式。配置 `via` 后，由 `via_mode` 指定模式，默认也是 `jump`。
-
-## 添加主机
-
-配置文件默认位于 `~/.config/ssh-mux/hosts.conf`，可通过环境变量 `SSH_MUX_CONFIG` 更改（`Windows` 下需经 `WSLENV` 转发，见上文 `Windows` 小节）。优先使用 `host add` 和 `host remove` 管理主机，也可以手动编辑文件。
-
-下面的地址和登录信息都是示例。将 `S` 设为本技能目录中 `ssh-mux.sh` 的实际路径；`Windows` 没有 `bash` 时改用 `ssh-mux.bat`：
-
-```bash
-S=/path/to/ssh-persistent/ssh-mux.sh
-
-# 直接连接，db 是主机别名
-$S host add db --host 7.7.7.7 --user root --password 'xxx'
-
-# 标准跳板机：先添加 jump，再添加通过 jump 访问的 web
-$S host add jump --host 5.5.5.5 --port 2222 --user jump --password 'xxx'
-$S host add web --host 6.6.6.6 --user root --password 'xxx' \
-        --via jump --via-mode jump
-
-# 堡垒机：通过登录名指定目标 IP
-$S host add bastion --host 2.2.2.2 --user T123456 \
-        --password 'xxx' --routing username
-$S host add A --host 3.3.3.3 --user root --password 'xxx' \
-        --via bastion --via-mode shell
-
-# 从 A 继续登录 B
-$S host add B --host 4.4.4.4 --user root --password 'xxx' \
-        --via A --via-mode shell
-
-$S list
-$S host remove B
-```
-
-`host add` 只保存配置，不连接主机。别名已存在时，需要先删除再添加。如果其他主机的 `via` 引用了某个别名，脚本会拒绝删除该别名。删除配置不会断开已经建立的会话。
-
-脚本保存配置时会将权限设为 `600`，即只有文件所有者可以读写。保存时会重写整个配置文件，原有注释会丢失。密码以明文保存，请勿把真实配置提交到公开仓库。
-
-### 手动编辑配置
-
-配置采用 `INI` 格式：每台主机占一个 `[别名]` 段，下面填写 `字段=值`。各字段的含义、默认值和完整示例统一放在 [hosts.conf.example](hosts.conf.example) 中，手动编辑时查阅该文件。
-
-`routing=username` 适用于登录名格式为 `<账号>/<目标IP>/any` 的堡垒机。脚本先填写堡垒机密码，再根据目标机的提示填写用户名和密码。
-
-密码中的 `%` 等特殊字符无需转义。手动编辑配置时，不要在密码后面添加行内注释，以免注释被当作密码的一部分。
+配置默认位于 `~/.config/ssh-mux/hosts.conf`，可用 `SSH_MUX_CONFIG` 更改。密码以明文保存，请勿把真实配置提交到公开仓库。
 
 ## 执行命令
 
-```bash
-$S connect A      # 提前连接；已连接时跳过
-$S exec A 'uptime' # 未连接时自动登录
-$S exec A 'ps aux --sort=-%cpu | head -20'
-$S status          # 查看连接状态
-$S exit A          # 断开 A 的连接；shell 模式下断开 A 的所有会话
-$S exit --all      # 断开所有主机的连接
-```
-
-`exec` 返回远程命令的退出码和输出。`shell` 模式会去除终端回显（终端重复显示的输入内容）和颜色控制码。
-
-`exec` 的 `--session`、`--timeout` 选项只能放在别名前后、命令开始之前；命令一旦开始，其后的内容全部按远程命令处理，不再解析为选项。`shell` 模式默认等待命令执行 `120` 秒，超时后发送 `Ctrl-C`，尝试恢复会话。`--timeout` 上限为 7200 秒，超过会被截断为 7200 秒。需要等待更长时间时，增加 `--timeout`：
+将 `S` 设为本技能目录中启动脚本的实际路径。下面的 `A`、`B` 是已配置的主机别名：
 
 ```bash
-$S exec A --timeout 300 'some-command'
+S=/path/to/ssh-persistent/ssh-mux.sh
+"$S" list
+"$S" connect A                         # 提前连接，已有连接时跳过
+"$S" exec A 'uptime'                   # 未连接时自动登录
+"$S" exec A --timeout 300 'some-command'
+"$S" status
+"$S" push A ./app.tar.gz /tmp/         # 先读文件传输说明
+"$S" pull B /var/log/app.log ./
 ```
 
-当前 `jump` 模式不使用 `--session` 和 `--timeout`：`connect`、`exec`、`push`、`pull` 传入这两个选项都会被忽略。这两个选项用于 `shell` 模式。
+`exec` 返回远程命令的输出和退出码。`shell` 模式会去除终端回显和颜色控制码。
+
+`--session`、`--timeout`、`--file` 放在别名前后均可，但必须位于命令文本之前。命令一旦开始，后续参数全部按远程命令处理。
+
+将完整命令文本作为一个参数传入。直接写 `exec A awk '{print $1}' 文件` 会在本地丢失程序外层引号；复杂命令优先使用下面的 `--file`。需要直接传入 `awk` 命令时，见[命令引号](references/troubleshooting.md#命令引号)。
+
+`shell` 模式执行命令默认超时为 120 秒，上限为 7200 秒，超过上限会被截断。`jump` 模式忽略 `--session` 和 `--timeout`；传输超时的含义见[文件传输](references/transfers.md)。
+
+### 从本地文件执行复杂命令
+
+将以下内容保存为本地 `check.sh`，`$1`、`$2` 和引号按正常脚本语法书写：
+
+```bash
+printf 'alice 10\nbob 20\n' | awk '
+    { total += $2 }
+    END { printf "total=%d\n", total }
+'
+```
+
+```bash
+"$S" exec A --file ./check.sh
+"$S" exec A --session case-1234 --timeout 300 -f ./check.sh
+"$S" exec A --file - < ./check.sh       # 从标准输入读取
+```
+
+`-f` 与 `--file` 同义，也支持 `--file=路径`；不能同时提供文件和命令文本。相对文件路径按本地当前目录解析。文件需为 `UTF-8`，支持文件开头的字节顺序标记和 `Windows` 换行。空文件、读取失败或编码错误会在连接前报错。
+
+文件内容不会经过本地 shell 展开，按远端登录 shell 的语法在独立子 shell 内执行。`#!` 不会自动选择解释器；目录和变量修改只影响本次执行，`exit` 返回退出码并保留持久连接。`shell` 模式分段传输与执行共用 `--timeout`，文件较大或网络较慢时可增加该值。
 
 ### 多个任务使用独立会话
 
-`shell` 模式会保留当前目录、环境变量等状态。同一个人工智能助手执行同一任务时，可以共用会话。多个助手并行工作时，必须为各自的任务指定不同的 `--session`，避免相互影响。
+`shell` 模式的命令文本会保留当前目录和环境变量。同一任务可共用会话；多个助手并行工作时，必须使用不同的 `--session`。同一任务的 `exec`、`push`、`pull` 使用同一会话名即可共用连接。
 
 ```bash
-$S exec A --session case-1234 'uptime'  # 助手甲
-$S exec A --session case-5678 'df -h'   # 助手乙
-$S exit A --session case-1234          # 只断开助手甲的会话
+"$S" exec A --session case-1234 'uptime'
+"$S" exec A --session case-5678 'df -h'
+"$S" exit A --session case-1234        # 只关闭该任务的会话
 ```
 
-不指定 `--session` 时使用 `default` 会话。每个独立会话都需要从头完成登录，之后才可继续使用。堡垒机可能限制同一账号的同时在线会话数。
-
-传输文件同理：多个助手并行执行 `push` 或 `pull` 时，也要为各自的任务指定不同的 `--session`，与 `exec` 使用同一名称即可共用会话。
-
-## 传输文件
-
-```bash
-$S push A ./app.tar.gz /tmp/   # 上传文件
-$S pull B /var/log/app.log ./  # 下载文件
-```
-
-`push` 和 `pull` 也支持 `--session` 和 `--timeout`，放置规则与 `exec` 相同。`--timeout` 默认为 3600 秒，指每两台主机之间传输文件的超时时间；超过 7200 秒时同样被截断为 7200 秒。
-
-`jump` 模式直接使用 `scp`，共用已建立的 SSH 连接。
-
-`shell` 模式通过中转主机运行 `scp`，逐台复制文件。例如访问路径为“本机 → `A` → `B`”时，上传文件先到 `A`，再从 `A` 复制到 `B`。下载顺序相反。这种模式需要配置 `[local]`，下面两种方式选一种。
-
-### 本机可以接受 SSH 登录
-
-本机运行 `sshd`（接收 SSH 登录的服务）时，在 `[local]` 中填写本机地址和登录信息：
-
-```bash
-$S host add local --host 1.1.1.1 --user myuser --password 'xxx'
-```
-
-地址必须能被中转主机访问，不能填写 `127.0.0.1`。中转主机通过 `scp` 从本机读取文件，或把文件写回本机。这种传输方式需要配置本机的登录密码。
-
-### 本机不能接受 SSH 登录
-
-用 `staging` 指定一台暂存主机。本机和连接路径上的第一台中转主机都必须能通过 SSH 登录这台服务器。
-
-```bash
-$S host add relay --host 5.5.5.5 --user root --password 'xxx'
-$S host add local --staging relay
-```
-
-上传时，本机先上传到暂存主机，中转主机再从那里取文件。下载时，中转主机先上传到暂存主机，本机再下载。
-
-暂存主机必须使用 `jump` 模式，可以经过标准跳板机访问，并且必须配置 `password`。使用 `staging` 后，`[local]` 的 `host`、`user`、`password` 可以省略。如果已有 `[local]`，先删除再按所选方式添加。
-
-每次在中转主机上复制文件时，脚本优先使用那台主机上的 `sshpass` 填写密码。没有 `sshpass` 时，脚本会尝试识别密码提示并应答。如果输出中恰好出现 `password:`，可能被误认为密码提示。
-
-注意：使用 `sshpass` 时，下一跳主机的密码会以命令行参数形式出现在中转主机上，该机上的其他用户可以通过 `ps` 看到，并会记入中转账号的 shell 历史。相邻两跳使用不同密码时，请评估这个暴露面是否可接受。
+未指定时使用 `default`。每个独立会话都要重新登录，堡垒机可能限制同一账号的并发会话数。
 
 ## 使用限制与断线处理
 
-- `shell` 模式向终端发送命令，单行命令不要超过约 4000 字符，以免超过终端的输入缓冲限制。
-- `shell` 模式不要运行需要手动交互的命令，例如 `vi`、前台 `top` 或 `read`。长任务可增加 `--timeout`，或使用 `nohup ... &` 在后台运行。
-- `shell` 会话断开后，脚本会尝试重建一次并重试命令。原命令可能已经执行，需确认重复执行不会产生额外影响。命令超时不会自动重试。
-- 排查结束后运行 `exit`，或运行 `exit --all` 断开全部连接。默认空闲 600 秒也会自动断开。
+- `shell` 模式不要运行需要手动交互的命令，如 `vi`、前台 `top` 或 `read`。长任务可增加超时，或用 `nohup ... &` 在后台运行。
+- **`shell` 模式断线后会尝试重建一次并重试命令，原命令可能已经执行。** 使用前确认重复执行不会产生额外影响。
+- `shell` 模式命令执行超时会发送 `Ctrl-C` 尝试恢复会话，不会自动重试命令。
+- 排查结束后关闭本任务的连接；默认空闲 600 秒也会自动断开。调整空闲时间或排查失败时读[连接排查说明](references/troubleshooting.md)。
 
-## 工作原理与排查文件
-
-`jump` 模式用 `ControlMaster` 建立后台 SSH 连接。后续 `ssh` 和 `scp` 通过本机的套接字（进程间通信接口）使用这条连接，无需重新认证。套接字默认位于 `/tmp/ssh_mux_j_<主机>_<端口>_<用户>`。
-
-`shell` 模式为每个“主机别名 + 会话名”启动一个守护进程，即持续在后台运行的进程。守护进程使用 `pty`（伪终端，供程序模拟终端输入输出）保持登录，自动应答各层登录提示。
-
-登录完成后，脚本关闭终端回显并清空命令提示符。执行命令时，在输出前后添加随机标记，以识别命令输出和退出码。
-
-`shell` 模式的文件默认位于 `/tmp/`，名称以 `ssh_mux_s_<别名>_<会话>` 开头：
-
-| 后缀 | 用途 |
-| --- | --- |
-| `.sock` | 命令行工具与守护进程通信的套接字。 |
-| `.log` | 守护进程日志。 |
-| `.err` | 建立会话失败时记录的错误。 |
-| `.pid` | 守护进程的进程号。 |
-
-连接失败时，先查看命令给出的错误和日志路径。
-
-### 环境变量
-
-| 变量 | 用途 | 默认值 |
-| --- | --- | --- |
-| `SSH_MUX_CONFIG` | 配置文件路径 | `~/.config/ssh-mux/hosts.conf` |
-| `SSH_MUX_SOCKET_DIR` | 套接字及会话文件所在目录 | `/tmp` |
-| `SSH_MUX_PERSIST` | 空闲多久后自动断开，单位为秒 | `600` |
-| `SSH_MUX_DEBUG` | 设为非空值后，把 `pty` 收发的数据写入守护进程日志，用于排查登录问题 | 空（不启用） |
-
-这些变量由执行脚本时的环境读取。经 `WSL` 运行时（`Windows`），在 `Windows` 侧设置的变量不会自动传入 `WSL`，需要经 `WSLENV` 转发才生效。
+```bash
+"$S" exit A                           # shell 模式关闭 A 的所有会话
+"$S" exit --all                       # 关闭所有主机的连接
+```

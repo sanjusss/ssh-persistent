@@ -14,6 +14,7 @@ import argparse
 import configparser
 import fcntl
 import glob
+import hashlib
 import json
 import os
 import pty
@@ -24,6 +25,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import string
 import struct
 import subprocess
@@ -79,6 +81,21 @@ def clean_output(data):
     if text.startswith("\n"):
         text = text[1:]
     return text
+
+
+def runtime_dir():
+    """所有连接文件放在当前用户独占的目录中，拒绝符号链接和开放权限。"""
+    path = os.path.join(SOCKET_DIR, f"ssh-mux-{os.getuid()}")
+    os.makedirs(SOCKET_DIR, exist_ok=True)
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    info = os.lstat(path)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        die(f"运行目录必须属于当前用户、权限为 700 且不能是符号链接: {path}")
+    return path
 
 
 # ---------- 配置 ----------
@@ -195,6 +212,8 @@ class PtySession:
         self.master = None
         self.proc = None
         self.buf = b""
+        self.control_socket = None
+        self.on_control = None
 
     def _write(self, data):
         while data:
@@ -205,8 +224,13 @@ class PtySession:
         self._write(text.encode() + b"\n")
 
     def _pump(self, timeout):
-        r, _, _ = select.select([self.master], [], [], timeout)
-        if not r:
+        readers = [self.master]
+        if self.control_socket is not None:
+            readers.append(self.control_socket)
+        r, _, _ = select.select(readers, [], [], timeout)
+        if self.control_socket is not None and self.control_socket in r:
+            self.on_control()
+        if self.master not in r:
             return
         try:
             data = os.read(self.master, 65536)
@@ -293,7 +317,8 @@ class PtySession:
             self._authenticate(auth)
             self._settle()
             for args, auth in self.plan[1:]:
-                self._send_line(" ".join(shlex.quote(a) for a in args))
+                # 替换中转 shell；内层 SSH 退出时整条终端链关闭，不能退回上一跳。
+                self._send_line("exec " + " ".join(shlex.quote(a) for a in args))
                 self._authenticate(auth)
                 self._settle()
         except Exception:
@@ -301,35 +326,61 @@ class PtySession:
             raise
         self.log("已登录到目标主机")
 
+    def _stage_command(self, command, token, deadline):
+        """用短行传送命令文本，避开终端补全、输入缓冲和堡垒机多行处理。"""
+        name = "__ssh_mux_" + token
+        data = command.encode("utf-8")
+        for index, offset in enumerate(range(0, len(data), 256)):
+            # `printf %b` 识别八进制字节；末尾字符防止命令替换删除换行。
+            encoded = "".join("\\0%03o" % byte for byte in data[offset:offset + 256])
+            previous = "" if index == 0 else '"${' + name + '}"'
+            ack = f"{token}_{index}"
+            self.buf = b""
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError("传输命令内容超时，尚未执行命令")
+            self._send_line(f" {name}={previous}$(printf '%b_' '{encoded}'); "
+                            f"{name}=${{{name}%_}}; printf '__CH_%s__\\n' {ack}")
+            self._wait_for(re.compile(rb"__CH_" + ack.encode() + rb"__"), remaining)
+        return name
+
     def exec(self, command, timeout, password=None):
         """执行命令，用随机标记识别输出范围，返回 (输出, 退出码)。
-        用于打印结束标记的命令需要等输出暂停后发送，并定期重发。
-        提前发送可能让读取标准输入的程序将这条命令当作输入，
-        例如等待密码的 `scp`。`password` 用于自动应答密码提示。
+        命令和结束标记在同一条 shell 语句中解析；标记不会被程序当作输入。
+        `eval` 在当前 shell 执行，因此保留目录和环境变量。`password` 用于应答提示。
         """
         tok = rand_token()
         if self.master is None:
             # 上次超时后重建失败，会话不可用，先尝试重新登录
             self.rebuild()
         xs = f"__XS_{tok}__".encode()
-        xe = re.compile(rb"__XE_" + tok.encode() + rb"__(\d+)")
-        probe = f"printf '__XE_%s__%s\\n' {tok} $?"
-        self.buf = b""
-        self._send_line(f"printf '__XS_%s__\\n' {tok}")
-        for line in command.split("\n"):
-            self._send_line(line)
+        xe = re.compile(rb"__XE_" + tok.encode() + rb"__(\d+)\r?\n")
         deadline = time.time() + timeout
+        source = shlex.quote(command)
+        cleanup = ""
+        if "\n" in command or "\t" in command or len(source.encode()) > 2000:
+            try:
+                name = self._stage_command(command, tok, deadline)
+                if time.time() >= deadline:
+                    raise TimeoutError("传输命令内容超时，尚未执行命令")
+            except TimeoutError:
+                self.close()
+                raise TimeoutError("传输命令内容超时，尚未执行命令") from None
+            source = '"${' + name + '}"'
+            cleanup = "; unset " + name
+        self.buf = b""
+        self._send_line(f" printf '__XS_%s__\\n' {tok}; "
+                        f"eval {source}; "
+                        f"printf '__XE_%s__%s\\n' {tok} $?{cleanup}")
         started = False
         answers = 0
-        probed = False
-        last_output = time.time()
         while True:
             if not started:
                 i = self.buf.find(xs)
                 if i >= 0:
                     started = True
                     self.buf = self.buf[i + len(xs):]
-            else:
+            if started:
                 m = xe.search(self.buf)
                 if m:
                     return clean_output(self.buf[:m.start()]), int(m.group(1))
@@ -339,21 +390,6 @@ class PtySession:
                     self.buf = b""
                     self._send_line(password)
                     answers += 1
-                    last_output = time.time()
-                elif password is None or (answers > 0 and not PW_RX.search(self.buf)):
-                    # 无密码时直接定期发送结束标记。带密码的回退路径(中转机无
-                    # sshpass)在应答过密码、输出静默且缓冲区末尾不再是密码提示后，
-                    # 恢复同样的定期探测；标记可能被当作密码误吞，靠重发兜底
-                    quiet = time.time() - last_output
-                    first_delay = 1.0 if password is None else 3.0
-                    if not probed and quiet > first_delay:
-                        self._send_line(probe)
-                        probed = True
-                        last_output = time.time()
-                    elif probed and quiet > 3.0:
-                        # 标记命令可能被程序作为标准输入读取，或原命令尚未结束，因此定期重发
-                        self._send_line(probe)
-                        last_output = time.time()
             remain = deadline - time.time()
             if remain <= 0:
                 try:
@@ -361,10 +397,7 @@ class PtySession:
                 except ConnectionError:
                     pass  # 恢复失败交给上层重建,这里统一报超时,避免误重发命令
                 raise TimeoutError(f"命令超过 {timeout} 秒未结束,已发送中断")
-            before = len(self.buf)
             self._pump(min(remain, 0.5))
-            if len(self.buf) > before:
-                last_output = time.time()
 
     def _recover(self):
         """命令超时后发送 `Ctrl-C`，再反复打印标记，确认终端恢复响应"""
@@ -408,16 +441,30 @@ class PtySession:
 
 # ---------- `shell` 模式:守护进程 ----------
 
+def shell_prefix(alias):
+    identity = json.dumps([os.path.realpath(CONFIG_PATH), valid_alias(alias)])
+    key = hashlib.sha256(identity.encode()).hexdigest()[:16]
+    return os.path.join(runtime_dir(), f"s_{key}_")
+
+
 def shell_sock(alias, session):
-    return os.path.join(SOCKET_DIR, f"ssh_mux_s_{alias}_{session}.sock")
+    return shell_prefix(alias) + session + ".sock"
 
 
 def shell_log_path(alias, session):
-    return os.path.join(SOCKET_DIR, f"ssh_mux_s_{alias}_{session}.log")
+    return shell_prefix(alias) + session + ".log"
 
 
 def shell_err_path(alias, session):
-    return os.path.join(SOCKET_DIR, f"ssh_mux_s_{alias}_{session}.err")
+    return shell_prefix(alias) + session + ".err"
+
+
+def shell_control_path(alias, session):
+    return shell_prefix(alias) + session + ".ctl"
+
+
+def shell_lock_path(alias, session):
+    return shell_prefix(alias) + session + ".lock"
 
 
 def do_exec(sess, req, log):
@@ -451,6 +498,19 @@ def do_exec(sess, req, log):
 
 
 def daemon_main(alias, session):
+    valid_alias(alias)
+    valid_session(session)
+    os.umask(0o077)
+    # 文件锁由内核在进程退出时释放，不依赖可能被复用的 pid。
+    with open(shell_lock_path(alias, session), "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        _daemon_main(alias, session)
+
+
+def _daemon_main(alias, session):
     logf = open(shell_log_path(alias, session), "a", buffering=1)
     # 日志可能包含远程输出和密码提示,只允许属主读写
     os.chmod(shell_log_path(alias, session), 0o600)
@@ -465,6 +525,9 @@ def daemon_main(alias, session):
         pass
     sock = shell_sock(alias, session)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    ctl_path = shell_control_path(alias, session)
+    ctl = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sess = None
     try:
         cp = load_config()
         sess = PtySession(build_shell_plan(cp, alias), log)
@@ -475,6 +538,13 @@ def daemon_main(alias, session):
             pass
         srv.bind(sock)
         os.chmod(sock, 0o600)  # socket 可以远程执行命令,只允许属主连接
+        try:
+            os.unlink(ctl_path)
+        except FileNotFoundError:
+            pass
+        ctl.bind(ctl_path)
+        os.chmod(ctl_path, 0o600)
+        ctl.listen(4)
         # 登录并绑定成功后才写 pid 文件,启动失败的路径不会留下残留
         with open(shell_pid_path(alias, session), "w") as f:
             f.write(str(os.getpid()))
@@ -488,8 +558,15 @@ def daemon_main(alias, session):
         os.chmod(err_path, 0o600)
         log(f"建立会话失败: {detail}")
         srv.close()
+        ctl.close()
+        if sess is not None:
+            sess.close()
         try:
             os.unlink(sock)
+        except FileNotFoundError:
+            pass
+        try:
+            os.unlink(ctl_path)
         except FileNotFoundError:
             pass
         sys.exit(1)
@@ -499,13 +576,46 @@ def daemon_main(alias, session):
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
     signal.signal(signal.SIGINT, lambda *a: sys.exit(0))
 
+    def handle_control():
+        # 命令运行期间也处理停止请求，由守护进程自己退出。
+        conn, _ = ctl.accept()
+        stop = False
+        with conn:
+            conn.settimeout(1)
+            try:
+                data = b""
+                while b"\n" not in data and len(data) < 4096:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                req = json.loads(data.decode())
+                cmd = req.get("cmd") if isinstance(req, dict) else None
+                stop = cmd == "stop"
+                reply = ({"status": "ok", "alias": alias, "session": session}
+                         if cmd in ("ping", "stop") else
+                         {"status": "error", "error": "控制接口只接受 ping 和 stop"})
+                conn.sendall(json.dumps(reply).encode() + b"\n")
+            except (OSError, ValueError):
+                pass
+        if stop:
+            log("收到 `stop`,退出")
+            raise SystemExit(0)
+
+    sess.control_socket = ctl
+    sess.on_control = handle_control
+
     try:
         while True:
-            r, _, _ = select.select([srv], [], [], 5)
+            r, _, _ = select.select([srv, ctl], [], [], 5)
             if not r:
                 if time.time() - last_active > PERSIST:
                     log(f"空闲超过 {PERSIST} 秒,退出")
                     break
+                continue
+            if ctl in r:
+                handle_control()
+            if srv not in r:
                 continue
             conn, _ = srv.accept()
             last_active = time.time()
@@ -544,6 +654,11 @@ def daemon_main(alias, session):
             last_active = time.time()
     finally:
         srv.close()
+        ctl.close()
+        try:
+            os.unlink(ctl_path)
+        except FileNotFoundError:
+            pass
         try:
             os.unlink(sock)
         except FileNotFoundError:
@@ -560,10 +675,19 @@ def daemon_main(alias, session):
 
 def rpc(alias, session, req, timeout=30):
     """向守护进程发一条请求;连不上返回 `None`"""
+    path = (shell_control_path(alias, session) if req.get("cmd") in ("ping", "stop")
+            else shell_sock(alias, session))
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o077):
+        die(f"拒绝连接不属于当前用户或权限不安全的套接字: {path}")
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
-        s.connect(shell_sock(alias, session))
+        s.connect(path)
     except OSError:
         s.close()
         return None
@@ -588,52 +712,23 @@ def rpc(alias, session, req, timeout=30):
 
 
 def shell_pid_path(alias, session):
-    return os.path.join(SOCKET_DIR, f"ssh_mux_s_{alias}_{session}.pid")
+    return shell_prefix(alias) + session + ".pid"
 
 
 def daemon_pid_alive(alias, session):
-    """pid 文件里的进程还在不在(用于区分"守护进程忙"和"守护进程不在")"""
-    try:
-        with open(shell_pid_path(alias, session)) as f:
-            pid = int(f.read().strip())
-    except (FileNotFoundError, ValueError):
+    """通过文件锁判断会话是否存活；pid 文件仅供诊断。"""
+    with open(shell_lock_path(alias, session), "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
         return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    try:
-        # pid 可能被复用,核对进程命令行里是否有 `_daemon` 标记
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            if b"_daemon" not in f.read():
-                return False
-    except OSError:
-        pass  # 没有 /proc(如 macOS)时只按 pid 存活判断
-    return True
 
 
 def kill_stale_daemon(alias, session):
-    """停止无响应的守护进程：先 SIGTERM,不退出再 SIGKILL,并删除 pid 文件"""
-    try:
-        with open(shell_pid_path(alias, session)) as f:
-            pid = int(f.read().strip())
-    except (FileNotFoundError, ValueError):
-        pid = None
-    if pid:
-        try:
-            os.kill(pid, signal.SIGTERM)
-            for _ in range(20):  # 最多等 2 秒
-                try:
-                    os.kill(pid, 0)
-                except OSError:
-                    break
-                time.sleep(0.1)
-            else:
-                os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass  # 进程已退出
+    """仅清理已退出进程的信息，不依据残留 pid 终止进程。"""
+    if daemon_pid_alive(alias, session):
+        die(f"会话 {alias}/{session} 仍持有锁，但控制接口无响应；未清理活动会话")
     try:
         os.unlink(shell_pid_path(alias, session))
     except FileNotFoundError:
@@ -654,10 +749,6 @@ def ensure_daemon(alias, session):
         os.unlink(err)
     except FileNotFoundError:
         pass
-    if daemon_pid_alive(alias, session) and not os.path.exists(shell_sock(alias, session)):
-        # pid 存活但 socket 不存在:上次启动失败或 socket 被清理,
-        # 残留进程不会再提供服务,先清掉以免之后每次连接都白等超时
-        kill_stale_daemon(alias, session)
     if not daemon_pid_alive(alias, session):
         logf = open(shell_log_path(alias, session), "ab")
         subprocess.Popen([sys.executable, os.path.abspath(__file__), "_daemon", alias, session],
@@ -687,38 +778,42 @@ def ensure_daemon(alias, session):
 
 # ---------- `jump` 模式:`ControlMaster` ----------
 
-JUMP_CPATH = os.path.join(SOCKET_DIR, "ssh_mux_j_%h_%p_%r")
+def jump_sock_file(cp, h):
+    # 相同私网地址可能属于不同网络，必须将整条登录路径计入连接身份。
+    identity = [os.path.realpath(CONFIG_PATH), [
+        [item.alias, item.host, item.port, item.user, item.via_mode, item.routing]
+        for item in build_chain(cp, h.alias)
+    ]]
+    digest = hashlib.sha256(json.dumps(identity, ensure_ascii=True).encode()).hexdigest()[:32]
+    return os.path.join(runtime_dir(), f"ssh_mux_j_{digest}")
 
 
-def jump_sock_file(h):
-    return os.path.join(SOCKET_DIR, f"ssh_mux_j_{h.host}_{h.port}_{h.user}")
-
-
-def jump_check(h):
+def jump_check(cp, h):
     return subprocess.run(
-        ["ssh", "-o", f"ControlPath={JUMP_CPATH}", "-p", str(h.port),
+        ["ssh", "-o", f"ControlPath={jump_sock_file(cp, h)}", "-p", str(h.port),
          "-O", "check", f"{h.user}@{h.host}"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
 def jump_connect(cp, h, quiet=False):
+    cpath = jump_sock_file(cp, h)
     via_cpath = None
     if h.via:
         via = get_host(cp, h.via)
         if via.routing or host_mode(via) == "shell":
             die(f"[{via.alias}] 是堡垒机(仅交互终端),[{h.alias}] 不能用 `via_mode=jump`")
         jump_connect(cp, via, quiet=True)
-        via_cpath = jump_sock_file(via)
-    if jump_check(h):
+        via_cpath = jump_sock_file(cp, via)
+    if jump_check(cp, h):
         if not quiet:
             print(f"已连接: {h.alias} ({h.addr()})")
         return
     try:
-        os.unlink(jump_sock_file(h))  # 清理异常断开残留的 socket
+        os.unlink(cpath)  # 清理异常断开残留的 socket
     except FileNotFoundError:
         pass
     cmd = ["ssh", "-o", "StrictHostKeyChecking=accept-new",
-           "-o", "ControlMaster=yes", "-o", f"ControlPath={JUMP_CPATH}",
+           "-o", "ControlMaster=yes", "-o", f"ControlPath={cpath}",
            "-o", f"ControlPersist={PERSIST}", "-o", "ConnectTimeout=10",
            "-p", str(h.port)]
     if via_cpath:
@@ -741,7 +836,7 @@ def jump_connect(cp, h, quiet=False):
         cmd = ["sshpass", "-e"] + cmd
         env["SSHPASS"] = h.password
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
-    if r.returncode != 0 or not jump_check(h):
+    if r.returncode != 0 or not jump_check(cp, h):
         die(f"连接失败: {h.alias} ({h.addr()}): {r.stderr.strip()}")
     if not quiet:
         print(f"已建立长连接: {h.alias} ({h.addr()}),空闲 {PERSIST} 秒自动关闭")
@@ -751,26 +846,43 @@ def jump_exec(cp, h, command):
     jump_connect(cp, h, quiet=True)
     # `-n` 加 DEVNULL:隔离标准输入,避免远程命令吃掉调用方的输入
     return subprocess.run(
-        ["ssh", "-n", "-o", f"ControlPath={JUMP_CPATH}", "-p", str(h.port),
+        ["ssh", "-n", "-o", f"ControlPath={jump_sock_file(cp, h)}", "-p", str(h.port),
          f"{h.user}@{h.host}", command], stdin=subprocess.DEVNULL).returncode
 
 
+_LOCAL_SCP_LEGACY = None
+_REMOTE_SCP_LEGACY = {}
+
+
+def scp_legacy_option(output):
+    # 新版强制使用 SCP 协议；不认识 -O 的旧版默认就是该协议。
+    return [] if re.search(r"(?:unknown|illegal|invalid) option", output, re.I) else ["-O"]
+
+
 def jump_scp(cp, h, direction, src, dst):
+    global _LOCAL_SCP_LEGACY
     jump_connect(cp, h, quiet=True)
+    if _LOCAL_SCP_LEGACY is None:
+        env = dict(os.environ, LC_ALL="C")
+        probe = subprocess.run(["scp", "-O"], stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, env=env)
+        _LOCAL_SCP_LEGACY = scp_legacy_option(probe.stdout + probe.stderr)
     remote = remote_spec(h, dst if direction == "push" else src)
-    args = ["scp", "-q", "-o", f"ControlPath={JUMP_CPATH}", "-P", str(h.port)]
+    args = ["scp"] + _LOCAL_SCP_LEGACY + [
+        "-q", "-o", f"ControlPath={jump_sock_file(cp, h)}", "-P", str(h.port)]
     args += [src, remote] if direction == "push" else [remote, dst]
     return subprocess.run(args, stdin=subprocess.DEVNULL).returncode
 
 
-def jump_exit(h):
-    if not os.path.exists(jump_sock_file(h)):
+def jump_exit(cp, h):
+    cpath = jump_sock_file(cp, h)
+    if not os.path.exists(cpath):
         return False
-    subprocess.run(["ssh", "-o", f"ControlPath={JUMP_CPATH}", "-p", str(h.port),
+    subprocess.run(["ssh", "-o", f"ControlPath={cpath}", "-p", str(h.port),
                     "-O", "exit", f"{h.user}@{h.host}"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        os.unlink(jump_sock_file(h))
+        os.unlink(cpath)
     except FileNotFoundError:
         pass
     return True
@@ -790,12 +902,13 @@ def shell_exec(alias, session, command, timeout, password=None):
 
 
 def remote_spec(h, path):
-    """`scp` 的远程路径参数：路径部分加引号,由对端 shell 解释,防止空格和命令注入"""
-    return f"{h.user}@{h.host}:{shlex.quote(path)}"
+    """转义远程 shell 特殊字符，同时保留 SCP 对返回文件名的校验。"""
+    escaped = re.sub(r"([^A-Za-z0-9_@%+=:,./-])", r"\\\1", path)
+    return f"{h.user}@{h.host}:{escaped}"
 
 
 def scp_spec(h, path):
-    """生成嵌在远程命令里的 `scp` 参数，分别为远程和本地命令解释器添加引号"""
+    """分别为中转主机与目标主机的 shell 添加引号。"""
     return shlex.quote(remote_spec(h, path))
 
 
@@ -803,6 +916,12 @@ def xfer_leg(hop, session, command, password, timeout):
     """在中转主机 `hop` 的会话里执行一条 `scp`,失败即报错退出。
     优先用 `sshpass` 填写密码，减少识别终端提示造成的错误。
     中转主机没有 `sshpass` 时，识别终端中的密码提示并自动填写"""
+    key = (hop.alias, session)
+    if key not in _REMOTE_SCP_LEGACY:
+        probe = shell_exec(hop.alias, session, "LC_ALL=C scp -O 2>&1", timeout)
+        _REMOTE_SCP_LEGACY[key] = scp_legacy_option(probe["output"])
+    if _REMOTE_SCP_LEGACY[key]:
+        command = "scp -O " + command[len("scp "):]
     # 密码通过环境变量传给 `sshpass -e`,避免出现在 `ps` 里;命令前加空格,
     # 配合 `HISTCONTROL=ignorespace` 时不会写入中转机的 shell 历史
     r = shell_exec(hop.alias, session,
@@ -856,10 +975,23 @@ def shell_push(cp, target, session, local_path, remote_path, timeout):
     if not os.path.exists(src):
         die(f"本地路径不存在: {src}")
     hops = shell_hops(build_chain(cp, target.alias))
-    tmp = f"/tmp/.ssh_mux_xfer_{rand_token()}"
-    stage_tmp = f"/tmp/.ssh_mux_xfer_{rand_token()}" if staging else None
+    tmp_dir = f"/tmp/.ssh_mux_xfer_{rand_token()}"
+    tmp = f"{tmp_dir}/{os.path.basename(src)}"
+    stage_dir = f"/tmp/.ssh_mux_xfer_{rand_token()}" if staging else None
+    stage_tmp = f"{stage_dir}/{os.path.basename(src)}" if staging else None
+    created_hops = []
+    stage_created = False
     try:
+        for hop in hops[:-1]:
+            result = shell_exec(hop.alias, session,
+                                f"mkdir -m 700 -- {shlex.quote(tmp_dir)}", timeout)
+            if result["exit"] != 0:
+                die(f"无法在 {hop.alias} 创建传输目录: {result['output'][-300:]}")
+            created_hops.append(hop)
         if staging:
+            if jump_exec(cp, staging, f"mkdir -m 700 -- {shlex.quote(stage_dir)}") != 0:
+                die(f"无法在暂存主机 {staging.alias} 创建传输目录")
+            stage_created = True
             if jump_scp(cp, staging, "push", src, stage_tmp) != 0:
                 die(f"传输失败(本机 -> 暂存主机 {staging.alias})")
             endpoint, epath, epw = staging, stage_tmp, staging.password
@@ -878,17 +1010,16 @@ def shell_push(cp, target, session, local_path, remote_path, timeout):
                      hops[i + 1].password, timeout)
     finally:
         # 无论传输成功与否,清理暂存主机和各中转主机上的临时文件(清理失败忽略)
-        if stage_tmp:
+        if stage_created:
             try:
-                jump_exec(cp, staging, f"rm -f {shlex.quote(stage_tmp)}")
-            except Exception:
+                jump_exec(cp, staging, f"rm -rf -- {shlex.quote(stage_dir)}")
+            except (Exception, SystemExit):
                 pass
-        if len(hops) > 1:
-            for h in hops[:-1]:
-                try:
-                    shell_exec(h.alias, session, f"rm -f {shlex.quote(tmp)}", 30)
-                except (Exception, SystemExit):
-                    pass
+        for h in created_hops:
+            try:
+                shell_exec(h.alias, session, f"rm -rf -- {shlex.quote(tmp_dir)}", 30)
+            except (Exception, SystemExit):
+                pass
     print(f"已上传 {local_path} -> {target.alias}:{remote_path}")
 
 
@@ -901,10 +1032,25 @@ def shell_pull(cp, target, session, remote_path, local_path, timeout):
     local_path = os.path.abspath(local_path)
     staging, local = xfer_endpoint(cp)
     hops = shell_hops(build_chain(cp, target.alias))
-    tmp = f"/tmp/.ssh_mux_xfer_{rand_token()}"
+    filename = remote_path.rstrip("/").rsplit("/", 1)[-1]
+    tmp_dir = f"/tmp/.ssh_mux_xfer_{rand_token()}"
+    tmp = f"{tmp_dir}/{filename}"
     n = len(hops)
-    stage_tmp = f"/tmp/.ssh_mux_xfer_{rand_token()}" if staging else None
+    stage_dir = f"/tmp/.ssh_mux_xfer_{rand_token()}" if staging else None
+    stage_tmp = f"{stage_dir}/{filename}" if staging else None
+    created_hops = []
+    stage_created = False
     try:
+        for hop in hops[:-1]:
+            result = shell_exec(hop.alias, session,
+                                f"mkdir -m 700 -- {shlex.quote(tmp_dir)}", timeout)
+            if result["exit"] != 0:
+                die(f"无法在 {hop.alias} 创建传输目录: {result['output'][-300:]}")
+            created_hops.append(hop)
+        if staging:
+            if jump_exec(cp, staging, f"mkdir -m 700 -- {shlex.quote(stage_dir)}") != 0:
+                die(f"无法在暂存主机 {staging.alias} 创建传输目录")
+            stage_created = True
         for i in range(n - 1, 0, -1):
             src = remote_path if i == n - 1 else tmp
             xfer_leg(hops[i - 1], session,
@@ -926,17 +1072,16 @@ def shell_pull(cp, target, session, remote_path, local_path, timeout):
                      local.password, timeout)
     finally:
         # 无论传输成功与否,清理暂存主机和各中转主机上的临时文件(清理失败忽略)
-        if stage_tmp:
+        if stage_created:
             try:
-                jump_exec(cp, staging, f"rm -f {shlex.quote(stage_tmp)}")
-            except Exception:
+                jump_exec(cp, staging, f"rm -rf -- {shlex.quote(stage_dir)}")
+            except (Exception, SystemExit):
                 pass
-        if n > 1:
-            for h in hops[:-1]:
-                try:
-                    shell_exec(h.alias, session, f"rm -f {shlex.quote(tmp)}", 30)
-                except (Exception, SystemExit):
-                    pass
+        for h in created_hops:
+            try:
+                shell_exec(h.alias, session, f"rm -rf -- {shlex.quote(tmp_dir)}", 30)
+            except (Exception, SystemExit):
+                pass
     print(f"已下载 {target.alias}:{remote_path} -> {local_path}")
 
 
@@ -963,14 +1108,14 @@ def cmd_status(cp):
             print(f"{alias}  {h.addr()}  堡垒机(通过登录名选择目标，不提供独立终端)")
             continue
         if host_mode(h) == "jump":
-            state = "已连接" if jump_check(h) else "未连接"
+            state = "已连接" if jump_check(cp, h) else "未连接"
             print(f"{alias}  {h.addr()}  jump  {state}")
         else:
             socks = glob.glob(shell_sock(alias, "*"))
             if not socks:
                 print(f"{alias}  {h.addr()}  shell  无会话")
             for sk in sorted(socks):
-                sess = os.path.basename(sk)[len(f"ssh_mux_s_{alias}_"):-len(".sock")]
+                sess = sk[len(shell_prefix(alias)):-len(".sock")]
                 # 只探测状态,无响应的守护进程不等太久
                 state = "已连接" if ping_session(alias, sess, timeout=2) else "守护进程无响应"
                 print(f"{alias}  {h.addr()}  shell  会话 {sess}: {state}")
@@ -1053,7 +1198,7 @@ def cmd_host_remove(alias):
 def cmd_exit(cp, alias, session):
     h = check_alias(cp, alias)
     if host_mode(h) == "jump":
-        if jump_exit(h):
+        if jump_exit(cp, h):
             print(f"已断开: {alias}")
         else:
             print(f"没有活跃连接: {alias}")
@@ -1063,24 +1208,47 @@ def cmd_exit(cp, alias, session):
         print(f"没有活跃连接: {alias}" + (f"(会话 {session})" if session else ""))
         return
     for sk in sorted(socks):
-        sess = os.path.basename(sk)[len(f"ssh_mux_s_{alias}_"):-len(".sock")]
+        sess = sk[len(shell_prefix(alias)):-len(".sock")]
         r = rpc(alias, sess, {"cmd": "stop"}, timeout=5)
         if r and r.get("status") == "ok":
             print(f"已断开: {alias}(会话 {sess})")
         else:
-            # 守护进程无响应:按 pid 文件终止进程,否则之后每次连接都要白等超时
+            # 只清理已经退出的会话；活动会话由控制接口停止。
             kill_stale_daemon(alias, sess)
             try:
                 os.unlink(sk)
             except FileNotFoundError:
                 pass
-            print(f"守护进程无响应,已终止进程并清理: {alias}(会话 {sess})")
+            print(f"已清理退出进程的残留会话: {alias}(会话 {sess})")
+
+
+EXEC_USAGE = ("用法: ssh-mux exec <别名> [--session S] [--timeout N] "
+              "<命令...> 或 --file <本地文件>（-f 同义，- 表示标准输入）")
+
+
+def read_command_file(path):
+    """读取本地 UTF-8 命令文件，兼容 BOM 和 Windows 换行。"""
+    try:
+        if path == "-":
+            text = sys.stdin.buffer.read().decode("utf-8-sig")
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+        else:
+            with open(path, encoding="utf-8-sig") as source:
+                text = source.read()
+    except (OSError, UnicodeError) as exc:
+        die(f"无法读取命令文件 {path!r}: {exc}")
+    if not text.strip():
+        die(f"命令文件为空: {path!r}")
+    if "\x00" in text:
+        die(f"命令文件不能包含 NUL 字符: {path!r}")
+    # 独立执行环境允许脚本使用 exit，不会关闭已有终端会话。
+    return "(\n" + text + "\n)"
 
 
 def run_exec_cli(argv):
-    """`exec` 单独解析参数:`--session`/`--timeout` 允许出现在命令前后任意位置
-    (`argparse` 的 `REMAINDER` 会将这些选项当作远程命令的一部分，因此单独解析)"""
+    """只解析命令开始前的选项，其后的内容全部交给远端 shell。"""
     session, timeout, alias = "default", 120, None
+    command_file = None
     cmd = []
     i = 0
     while i < len(argv):
@@ -1088,6 +1256,20 @@ def run_exec_cli(argv):
         if a == "--":
             cmd = argv[i + 1:]
             break
+        if a in ("--file", "-f") or a.startswith("--file="):
+            if command_file is not None:
+                die("`--file` 只能指定一次")
+            if a.startswith("--file="):
+                command_file = a.split("=", 1)[1]
+                i += 1
+            else:
+                if i + 1 >= len(argv):
+                    die(f"{a} 需要本地文件路径")
+                command_file = argv[i + 1]
+                i += 2
+            if not command_file:
+                die("`--file` 需要本地文件路径")
+            continue
         if a == "--session" and i + 1 < len(argv):
             session = argv[i + 1]
             i += 2
@@ -1105,7 +1287,7 @@ def run_exec_cli(argv):
             i += 1
             continue
         if a in ("-h", "--help") and alias is None:
-            print("用法: ssh-mux exec <别名> [--session S] [--timeout N] <命令...>")
+            print(EXEC_USAGE)
             return
         if alias is None:
             alias = a
@@ -1113,11 +1295,13 @@ def run_exec_cli(argv):
             continue
         cmd = argv[i:]
         break
-    if not alias or not cmd:
-        die("用法: ssh-mux exec <别名> [--session S] [--timeout N] <命令...>")
+    if not alias or (not cmd and command_file is None):
+        die(EXEC_USAGE)
+    if command_file is not None and cmd:
+        die("`--file` 不能与命令文本同时使用")
+    command = read_command_file(command_file) if command_file is not None else " ".join(cmd).strip()
     cp = load_config()
     h = check_alias(cp, alias)
-    command = " ".join(cmd).strip()
     if host_mode(h) == "jump":
         sys.exit(jump_exec(cp, h, command))
     r = shell_exec(alias, valid_session(session), command, timeout)
@@ -1151,10 +1335,11 @@ def main():
     add_session(p)
 
     p = sub.add_parser("exec", allow_abbrev=False,
-                       help="复用长连接执行远程命令(未连接时自动建连;选项可放任意位置)")
+                       help="执行命令或 --file 本地文件(选项放在命令文本之前)")
     p.add_argument("alias")
     add_session(p)
     p.add_argument("--timeout", type=int, default=120, help="命令超时秒数(默认 120)")
+    p.add_argument("--file", "-f", help="从本地 UTF-8 文件读取命令，- 表示标准输入")
     p.add_argument("command", nargs="*")
 
     # 注意:ssh-mux.sh 按位置参数计数做路径转换,push/pull 新增带值选项时
