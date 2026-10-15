@@ -1,8 +1,10 @@
 # 多级跳板混合传输设计
 
-状态：早期设计记录。`hybrid`、`--leg`、`--plan` 已实现，当前用法和限制见[混合传输](hybrid-transfers.md)。
+状态：早期设计记录。`hybrid`、`--leg`、`--plan` 已实现，当前用法和限制见[混合传输](../references/hybrid-transfers.md)。
 
 后续设计已改为在连接发起端运行临时脚本，远端文件内容不经本机中转。自动重试失败段和跨段优化仍未实现。
+
+补充：逐段代理接入后，各段执行器的登录、`SCP` 和文件流共用该段代理，含凭据的任务请求经专用输入通道下发。连接方向与回传限制的最新说明以[混合传输](../references/hybrid-transfers.md)为准。
 
 现有默认 `scp` 和显式 `auto`、`stream`、`base64`、`octal` 保持原有含义。实现本设计时，只有选择 `--transport hybrid` 才进入新的规划与执行流程。
 

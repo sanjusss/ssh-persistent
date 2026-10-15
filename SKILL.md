@@ -1,6 +1,6 @@
 ---
 name: ssh-persistent
-description: 通过 SSH 长连接排查远程服务器，适合需要多次执行命令或传输文件的任务。统一经 `ssh-mux.sh` 管理直连、标准跳板机和仅允许交互式登录的堡垒机（内部调用 `ssh-mux.py`）。支持 Linux 和 `macOS`；`Windows` 需在 `WSL` 中运行。
+description: 通过 SSH 长连接排查远程服务器，适合需要多次执行命令或传输文件的任务。统一经 `ssh-mux.sh` 管理直连、标准跳板机和仅允许交互式登录的堡垒机（内部调用 `ssh-mux.py`），各连接段可分别使用 `HTTP` 或 `SOCKS5` 代理。支持 Linux 和 `macOS`；`Windows` 需在 `WSL` 中运行。
 ---
 
 # SSH 长连接管理
@@ -11,7 +11,7 @@ description: 通过 SSH 长连接排查远程服务器，适合需要多次执�
 
 ## 运行环境与连接方式
 
-Linux 和 `macOS` 需要 Python 3.7 或更新版本，以及 `ssh`；默认文件传输需要 `scp`，使用 `--transport auto` 等新方式时可省略。脚本只使用 Python 标准库。`jump` 模式使用密码认证时，本机还需要 `sshpass`；使用密钥时省略密码配置。
+Linux 和 `macOS` 需要 Python 3.7 或更新版本，以及 `ssh`；默认文件传输需要 `scp`，使用 `--transport auto` 等方式时可省略。脚本只使用 Python 标准库。`jump` 模式使用密码认证时，本机还需要 `sshpass`；使用密钥时省略密码配置。
 
 `Windows` 经 `WSL` 运行：有 `bash` 时使用 `ssh-mux.sh`，否则使用 `ssh-mux.bat`。在 `Windows` 上操作前，先读 [Windows 运行说明](references/windows.md)。
 
@@ -22,6 +22,8 @@ Linux 和 `macOS` 需要 Python 3.7 或更新版本，以及 `ssh`；默认文�
 
 没有 `via` 时使用 `jump`；配置 `via` 后由 `via_mode` 指定，默认仍为 `jump`。
 
+每台主机可配置 `proxy` 系列字段，让“上一节点 → 该主机”这一段经 `HTTP` 或 `SOCKS5` 代理连接，各段互不继承。配置字段、优先级和依赖要求见[主机与连接配置](references/connections.md#逐段代理)；远端终端段需要在起点主机运行代理程序（Python 3.4 或更新版本）。
+
 ## 按需读取引用文档
 
 仅在任务涉及对应场景时读取，不必预先加载全部文档。
@@ -29,9 +31,9 @@ Linux 和 `macOS` 需要 Python 3.7 或更新版本，以及 `ssh`；默认文�
 | 何时读取 | 文档 |
 | --- | --- |
 | 使用 `Windows`、准备 `WSL` 或处理路径转换 | [Windows 运行说明](references/windows.md) |
-| 新增或删除主机、配置跳板机和堡垒机 | [主机与连接配置](references/connections.md) |
+| 新增或删除主机、配置跳板机、堡垒机或逐段代理 | [主机与连接配置](references/connections.md) |
 | 上传、下载文件或配置暂存主机 | [文件传输](references/transfers.md) |
-| 连接失败、会话无响应，或调整环境变量 | [连接排查与运行机制](references/troubleshooting.md) |
+| 连接或代理失败、会话无响应，或调整环境变量 | [连接排查与运行机制](references/troubleshooting.md) |
 | 手动编辑配置、查询字段含义 | [hosts.conf.example](hosts.conf.example) |
 
 配置默认位于 `~/.config/ssh-mux/hosts.conf`，可用 `SSH_MUX_CONFIG` 更改。密码以明文保存，请勿把真实配置提交到公开仓库。

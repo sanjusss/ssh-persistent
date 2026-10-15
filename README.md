@@ -1,6 +1,6 @@
 # ssh-persistent
 
-用 `ssh-mux.sh` 调用（内部执行 `ssh-mux.py`；`Windows` 没有 `bash` 时用 `ssh-mux.bat`），保持 SSH 长连接，方便反复排查同一台服务器。首次登录后，后续命令和文件传输继续使用已有连接。支持直接连接、标准跳板机，以及只允许交互式登录的堡垒机。
+用 `ssh-mux.sh` 调用（内部执行 `ssh-mux.py`；`Windows` 没有 `bash` 时用 `ssh-mux.bat`），保持 SSH 长连接，方便反复排查同一台服务器。首次登录后，后续命令和文件传输继续使用已有连接。支持直接连接、标准跳板机，以及只允许交互式登录的堡垒机。各连接段可分别配置 `HTTP` 或 `SOCKS5` 代理，见[主机与连接配置](references/connections.md#逐段代理)。
 
 脚本可以手动运行，也可以供人工智能助手调用。
 
@@ -43,16 +43,16 @@ $S exit db
 | 要做的事 | 查看位置 |
 | --- | --- |
 | 使用 `Windows`、安装 `WSL` 或转换本地路径 | [Windows 运行说明](references/windows.md) |
-| 配置直连、跳板机或堡垒机 | [主机与连接配置](references/connections.md) |
+| 配置直连、跳板机、堡垒机或逐段代理 | [主机与连接配置](references/connections.md) |
 | 执行命令、设置超时、使用独立会话 | [执行命令](SKILL.md#执行命令) |
 | 上传、下载文件，配置暂存主机 | [文件传输](references/transfers.md) |
 | 了解命令限制和断线重试 | [使用限制与断线处理](SKILL.md#使用限制与断线处理) |
-| 查找日志、修改配置路径和空闲超时 | [连接排查与运行机制](references/troubleshooting.md) |
+| 查找日志、排查代理失败、修改配置路径和空闲超时 | [连接排查与运行机制](references/troubleshooting.md) |
 | 手动编辑配置文件 | [hosts.conf.example](hosts.conf.example) |
 
 ## 文件说明
 
-`SKILL.md` 保存常用操作和关键约束，`references/` 保存按场景读取的详细说明，`hosts.conf.example` 说明配置字段。`ssh-mux.py` 管理连接与命令，`ssh_transfer.py` 实现无需 `scp` 的文件传输。`ssh_hybrid.py` 和 `ssh_worker.py` 分别负责混合传输调度与远端执行，`ssh_pty.py` 提供共用终端控制。`ssh-mux.sh` 和 `ssh-mux.bat` 负责环境检查和路径转换。运行脚本位于技能根目录，回归测试放在 `tests/` 中。
+`SKILL.md` 保存常用操作和关键约束，`references/` 保存按场景读取的详细说明，`hosts.conf.example` 说明配置字段。`ssh-mux.py` 管理连接与命令，`ssh_transfer.py` 实现无需 `scp` 的文件传输。`ssh_hybrid.py` 和 `ssh_worker.py` 分别负责混合传输调度与远端执行，`ssh_pty.py` 提供共用终端控制，`ssh_proxy.py` 提供共用的 `HTTP`/`SOCKS5` 代理握手。`ssh-mux.sh` 和 `ssh-mux.bat` 负责环境检查和路径转换。运行脚本位于技能根目录，回归测试放在 `tests/` 中。
 
 ## 本地测试
 

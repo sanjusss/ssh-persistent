@@ -17,6 +17,19 @@
 #               再根据目标机的提示填写用户名和密码。
 #   `staging`   暂存主机的别名，仅用于 [local] 段。
 #
+# 逐段代理字段（都可省略；某主机的代理字段控制“上一节点 → 该主机”这一段）：
+#   `proxy`           `http` 或 `socks5`；填写 `direct` 表示显式直连，
+#                     并忽略同段其余 `proxy_*` 字段和 `SSH_MUX_PROXY`。
+#   `proxy_host`      代理地址；相对于段起点解析，可以是域名或 IP。
+#   `proxy_port`      代理端口，1-65535。
+#   `proxy_user`      代理认证用户名，可省略；HTTP 用户名不能含冒号。
+#   `proxy_password`  代理认证密码，可省略；只写密码不写用户名会被拒绝。
+# 没有配置任何代理字段时，只有从本机出发的第一段读取环境变量
+# `SSH_MUX_PROXY`（格式 `http://主机:端口` 或 `socks5://主机:端口`，不含用户名），
+# 后续各段默认直连。代理不会沿登录链继承或串联。
+# 用户名路由堡垒机作为入口时，入口段使用堡垒机的代理配置；
+# 目标主机上的代理配置对该入口段不生效，请写在堡垒机上。
+#
 # `shell` 模式传输文件需要 [local]；`jump` 模式不需要。
 # 如果本机运行了 `sshd`（接收 SSH 登录的服务），按下面填写本机信息。
 # 地址必须能被中转主机访问，不能填写 127.0.0.1。
@@ -34,13 +47,20 @@ password=mypass
 # staging=jump
 
 # 堡垒机：通过 `<账号>/<目标IP>/any` 格式的登录名选择目标服务器。
+# 本机到堡垒机这一段需要经过 HTTP 代理时，代理配置写在堡垒机上。
 [bastion]
 host=2.2.2.2
 user=T123456
 password=jump-pass
 routing=username
+# proxy=http
+# proxy_host=proxy.corp.example
+# proxy_port=8080
+# proxy_user=proxy-account
+# proxy_password=proxy-pass
 
 # 目标主机 `A`：通过 `bastion` 登录。
+# 堡垒机直接转到目标，入口段不使用这里的代理字段。
 [A]
 host=3.3.3.3
 user=root
@@ -50,12 +70,17 @@ via_mode=shell
 
 # 目标主机 `B`：先登录 `A`，再从 `A` 登录 `B`。
 # 传输文件时，`A` 也需要能通过 `scp` 访问 `B`。
+# 下面三行让 `A` 到 `B` 这一段经过 `SOCKS5` 代理（代理地址由 `A` 解析）。
+# 该段在 `A` 上准备代理程序，`A` 需要 Python 3.4 或更新版本。
 [B]
 host=4.4.4.4
 user=root
 password=b-pass
 via=A
 via_mode=shell
+# proxy=socks5
+# proxy_host=10.1.1.1
+# proxy_port=1080
 
 # 标准 SSH 跳板机：支持 `ssh -J`。
 [jump]
@@ -65,15 +90,22 @@ user=jump
 password=jump-pass
 
 # 目标主机 `web`：通过 `jump` 登录。
+# `jump` 到 `web` 这一段需要代理时，代理配置写在 `web` 上；
+# 本机辅助程序复用 `jump` 的连接访问代理完成握手，`jump` 上无需 Python。
 [web]
 host=6.6.6.6
 user=root
 password=web-pass
 via=jump
 via_mode=jump
+# proxy=http
+# proxy_host=10.2.2.2
+# proxy_port=8080
 
 # 直连主机 `db`：不填写 `via`，自动使用 `jump` 模式。
+# `proxy=direct` 表示显式直连：忽略 `SSH_MUX_PROXY` 和同段残留的 `proxy_*` 字段。
 [db]
 host=7.7.7.7
 user=root
 password=db-pass
+# proxy=direct

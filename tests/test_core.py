@@ -31,7 +31,9 @@ class IsolatedRuntimeTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.socket_patch = mock.patch.object(mux, "SOCKET_DIR", str(self.root))
-        self.config_patch = mock.patch.object(mux, "CONFIG_PATH", str(self.root / "hosts.conf"))
+        self.config_patch = mock.patch.object(
+            mux, "CONFIG_PATH", str(self.root / "hosts.conf")
+        )
         self.socket_patch.start()
         self.config_patch.start()
         self.addCleanup(self.socket_patch.stop)
@@ -40,19 +42,26 @@ class IsolatedRuntimeTest(unittest.TestCase):
     @staticmethod
     def config():
         config = configparser.ConfigParser(interpolation=None)
-        config.read_dict({
-            "hop": {"host": "hop.invalid"},
-            "a": {"host": "a.invalid", "via": "hop", "via_mode": "shell"},
-            "a_b": {"host": "ab.invalid", "via": "hop", "via_mode": "shell"},
-        })
+        config.read_dict(
+            {
+                "hop": {"host": "hop.invalid"},
+                "a": {"host": "a.invalid", "via": "hop", "via_mode": "shell"},
+                "a_b": {"host": "ab.invalid", "via": "hop", "via_mode": "shell"},
+            }
+        )
         return config
 
     def test_alias_and_session_have_unambiguous_paths(self):
-        for path_function in (mux.shell_sock, mux.shell_log_path,
-                              mux.shell_err_path, mux.shell_pid_path):
+        for path_function in (
+            mux.shell_sock,
+            mux.shell_log_path,
+            mux.shell_err_path,
+            mux.shell_pid_path,
+        ):
             with self.subTest(path_function=path_function.__name__):
-                self.assertNotEqual(path_function("a_b", "c"),
-                                    path_function("a", "b_c"))
+                self.assertNotEqual(
+                    path_function("a_b", "c"), path_function("a", "b_c")
+                )
 
     def test_configuration_files_have_separate_sessions(self):
         first = mux.shell_sock("a", "default")
@@ -128,19 +137,27 @@ class IsolatedRuntimeTest(unittest.TestCase):
         Path(mux.shell_sock("a_b", "default")).touch()
         with mock.patch.object(mux, "rpc", return_value={"status": "ok"}) as rpc:
             mux.cmd_exit(self.config(), "a", None)
-        stopped = [(call[0][0], call[0][1]) for call in rpc.call_args_list
-                   if call[0][2].get("cmd") == "stop"]
+        stopped = [
+            (call[0][0], call[0][1])
+            for call in rpc.call_args_list
+            if call[0][2].get("cmd") == "stop"
+        ]
         self.assertEqual(stopped, [("a", "default")])
 
     def test_stale_pid_never_signals_unrelated_process(self):
         Path(mux.shell_sock("a", "default")).touch()
         Path(mux.shell_pid_path("a", "default")).write_text("424242")
-        with mock.patch.object(mux, "rpc", return_value=None), \
-                mock.patch.object(mux.os, "kill") as kill, \
-                mock.patch.object(mux.time, "sleep"):
+        with (
+            mock.patch.object(mux, "rpc", return_value=None),
+            mock.patch.object(mux.os, "kill") as kill,
+            mock.patch.object(mux.time, "sleep"),
+        ):
             mux.cmd_exit(self.config(), "a", "default")
-        destructive_calls = [call for call in kill.call_args_list
-                             if call[0][1] in (signal.SIGTERM, signal.SIGKILL)]
+        destructive_calls = [
+            call
+            for call in kill.call_args_list
+            if call[0][1] in (signal.SIGTERM, signal.SIGKILL)
+        ]
         self.assertEqual(destructive_calls, [])
 
     def start_local_daemon(self):
@@ -154,11 +171,19 @@ spec.loader.exec_module(mux)
 mux.build_shell_plan = lambda config, alias: [(['bash', '--noprofile', '--norc', '-i'], [])]
 mux.daemon_main('a', 'default')
 """
-        environment = dict(os.environ, SSH_MUX_CONFIG=mux.CONFIG_PATH,
-                           SSH_MUX_SOCKET_DIR=mux.SOCKET_DIR, SSH_MUX_PERSIST="30")
-        process = subprocess.Popen([sys.executable, "-c", source, str(SCRIPT)],
-                                   env=environment, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        environment = dict(
+            os.environ,
+            SSH_MUX_CONFIG=mux.CONFIG_PATH,
+            SSH_MUX_SOCKET_DIR=mux.SOCKET_DIR,
+            SSH_MUX_PERSIST="30",
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", source, str(SCRIPT)],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
 
         def cleanup():
             if process.poll() is None:
@@ -184,11 +209,18 @@ mux.daemon_main('a', 'default')
                 return
             time.sleep(0.02)
         log_path = Path(mux.shell_log_path("a", "default"))
-        self.fail("本地守护进程未就绪：" + (log_path.read_text() if log_path.exists() else "无日志"))
+        self.fail(
+            "本地守护进程未就绪："
+            + (log_path.read_text() if log_path.exists() else "无日志")
+        )
 
     def assert_daemon_resources_released(self):
         self.assertFalse(mux.daemon_pid_alive("a", "default"))
-        for path_function in (mux.shell_sock, mux.shell_control_path, mux.shell_pid_path):
+        for path_function in (
+            mux.shell_sock,
+            mux.shell_control_path,
+            mux.shell_pid_path,
+        ):
             self.assertFalse(Path(path_function("a", "default")).exists())
 
     @unittest.skipUnless(shutil.which("bash"), "需要本地 Bash")
@@ -196,10 +228,16 @@ mux.daemon_main('a', 'default')
         process = self.start_local_daemon()
         self.wait_for_local_daemon()
         self.assertTrue(mux.daemon_pid_alive("a", "default"))
-        reply = mux.rpc("a", "default", {"cmd": "exec", "command": "printf 'ok\\n'; false",
-                                         "timeout": 3}, timeout=4)
+        reply = mux.rpc(
+            "a",
+            "default",
+            {"cmd": "exec", "command": "printf 'ok\\n'; false", "timeout": 3},
+            timeout=4,
+        )
         self.assertEqual(reply, {"status": "ok", "exit": 1, "output": "ok\n"})
-        self.assertEqual(mux.rpc("a", "default", {"cmd": "stop"}, timeout=1)["status"], "ok")
+        self.assertEqual(
+            mux.rpc("a", "default", {"cmd": "stop"}, timeout=1)["status"], "ok"
+        )
         self.assertEqual(process.wait(timeout=3), 0)
         self.assert_daemon_resources_released()
 
@@ -212,8 +250,14 @@ mux.daemon_main('a', 'default')
         result = []
 
         def execute():
-            result.append(mux.rpc("a", "default", {"cmd": "exec", "command": command,
-                                                    "timeout": 40}, timeout=5))
+            result.append(
+                mux.rpc(
+                    "a",
+                    "default",
+                    {"cmd": "exec", "command": command, "timeout": 40},
+                    timeout=5,
+                )
+            )
 
         thread = threading.Thread(target=execute)
         thread.start()
@@ -223,7 +267,9 @@ mux.daemon_main('a', 'default')
             time.sleep(0.02)
         self.assertTrue(started.exists(), "长命令没有开始")
         self.assertTrue(mux.ping_session("a", "default", timeout=1))
-        self.assertEqual(mux.rpc("a", "default", {"cmd": "stop"}, timeout=1)["status"], "ok")
+        self.assertEqual(
+            mux.rpc("a", "default", {"cmd": "stop"}, timeout=1)["status"], "ok"
+        )
         self.assertEqual(process.wait(timeout=3), 0)
         thread.join(timeout=2)
         self.assertFalse(thread.is_alive())
@@ -235,27 +281,141 @@ mux.daemon_main('a', 'default')
         processes = [self.start_local_daemon(), self.start_local_daemon()]
         self.wait_for_local_daemon()
         deadline = time.monotonic() + 3
-        while all(process.poll() is None for process in processes) and time.monotonic() < deadline:
+        while (
+            all(process.poll() is None for process in processes)
+            and time.monotonic() < deadline
+        ):
             time.sleep(0.02)
         active = [process for process in processes if process.poll() is None]
         self.assertEqual(len(active), 1)
         stopped = [process for process in processes if process.poll() is not None]
         self.assertEqual(stopped[0].returncode, 0)
-        self.assertEqual(int(Path(mux.shell_pid_path("a", "default")).read_text()), active[0].pid)
-        reply = mux.rpc("a", "default", {"cmd": "exec", "command": "printf owner", "timeout": 3},
-                        timeout=4)
+        self.assertEqual(
+            int(Path(mux.shell_pid_path("a", "default")).read_text()), active[0].pid
+        )
+        reply = mux.rpc(
+            "a",
+            "default",
+            {"cmd": "exec", "command": "printf owner", "timeout": 3},
+            timeout=4,
+        )
         self.assertEqual(reply, {"status": "ok", "exit": 0, "output": "owner"})
-        self.assertEqual(mux.rpc("a", "default", {"cmd": "stop"}, timeout=1)["status"], "ok")
+        self.assertEqual(
+            mux.rpc("a", "default", {"cmd": "stop"}, timeout=1)["status"], "ok"
+        )
         self.assertEqual(active[0].wait(timeout=3), 0)
         self.assert_daemon_resources_released()
+
+
+class DaemonBootTimeoutTest(unittest.TestCase):
+    """启动期限按链路长度估算：基准 90，每跳 45，每个远端代理准备 60，外加基准 30。"""
+
+    @staticmethod
+    def config(entries):
+        cp = configparser.ConfigParser(interpolation=None)
+        cp.read_dict(entries)
+        return cp
+
+    def setUp(self):
+        # 估算会读取本机默认代理变量；测试时固定为空
+        patcher = mock.patch.dict(os.environ, {"SSH_MUX_PROXY": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_single_hop_keeps_base_timeout(self):
+        cp = self.config(
+            {
+                "bastion": {"host": "b.invalid", "routing": "username"},
+                "a": {"host": "a.invalid", "via": "bastion", "via_mode": "shell"},
+            }
+        )
+        self.assertEqual(mux.daemon_boot_timeout(cp, "a"), 90)
+
+    def test_two_hop_shell_chain_scales(self):
+        cp = self.config(
+            {
+                "bastion": {"host": "b.invalid", "routing": "username"},
+                "a": {"host": "a.invalid", "via": "bastion", "via_mode": "shell"},
+                "b": {"host": "b2.invalid", "via": "a", "via_mode": "shell"},
+            }
+        )
+        self.assertEqual(mux.daemon_boot_timeout(cp, "b"), 30 + 45 * 2)
+
+    def test_remote_proxy_prepare_adds_time(self):
+        cp = self.config(
+            {
+                "bastion": {"host": "b.invalid", "routing": "username"},
+                "a": {"host": "a.invalid", "via": "bastion", "via_mode": "shell"},
+                "b": {
+                    "host": "b2.invalid",
+                    "via": "a",
+                    "via_mode": "shell",
+                    "proxy": "socks5",
+                    "proxy_host": "10.0.0.1",
+                    "proxy_port": "1080",
+                },
+            }
+        )
+        self.assertEqual(mux.daemon_boot_timeout(cp, "b"), 30 + 45 * 2 + 60)
+
+    def test_local_first_hop_proxy_adds_no_prepare_time(self):
+        cp = self.config(
+            {
+                "a": {
+                    "host": "a.invalid",
+                    "proxy": "http",
+                    "proxy_host": "10.0.0.1",
+                    "proxy_port": "8080",
+                },
+            }
+        )
+        self.assertEqual(mux.daemon_boot_timeout(cp, "a"), 90)
+
+    def test_mixed_chain_counts_jump_prefix_hops(self):
+        cp = self.config(
+            {
+                "a": {"host": "a.invalid"},
+                "b": {
+                    "host": "b.invalid",
+                    "via": "a",
+                    "via_mode": "jump",
+                    "proxy": "http",
+                    "proxy_host": "10.0.0.1",
+                    "proxy_port": "8080",
+                },
+                "c": {"host": "c.invalid", "via": "b", "via_mode": "shell"},
+            }
+        )
+        # 开头两个标准跳板段在本机建立（各计一跳），B → C 无代理不准备远端程序
+        self.assertEqual(mux.daemon_boot_timeout(cp, "c"), 30 + 45 * 3)
+
+    def test_invalid_config_falls_back_to_base(self):
+        cp = self.config(
+            {"a": {"host": "a.invalid", "via": "missing", "via_mode": "shell"}}
+        )
+        self.assertEqual(mux.daemon_boot_timeout(cp, "a"), 90)
 
 
 @unittest.skipUnless(shutil.which("bash"), "需要本地 Bash 模拟交互式 SSH 会话")
 class PtySessionTest(unittest.TestCase):
     def make_session(self, nested=False):
-        plan = [(["env", "MUX_TEST_HOP=outer", "bash", "--noprofile", "--norc", "-i"], [])]
+        plan = [
+            (["env", "MUX_TEST_HOP=outer", "bash", "--noprofile", "--norc", "-i"], [])
+        ]
         if nested:
-            plan.append((["env", "MUX_TEST_HOP=target", "bash", "--noprofile", "--norc", "-i"], []))
+            plan.append(
+                (
+                    [
+                        "env",
+                        "MUX_TEST_HOP=target",
+                        "bash",
+                        "--noprofile",
+                        "--norc",
+                        "-i",
+                    ],
+                    [],
+                )
+            )
         session = mux.PtySession(plan, lambda message: None)
         self.addCleanup(session.close)
         session.start()
@@ -270,12 +430,16 @@ class PtySessionTest(unittest.TestCase):
 
     def test_command_finishes_when_password_prompt_is_absent(self):
         session = self.make_session()
-        output, code = session.exec("printf 'copied\\n'", 6, password="unused-test-password")
+        output, code = session.exec(
+            "printf 'copied\\n'", 6, password="unused-test-password"
+        )
         self.assertEqual((output, code), ("copied\n", 0))
 
     def test_multiline_command_keeps_exit_code_and_session_state(self):
         session = self.make_session()
-        command = "MUX_TEST_VALUE='hello world'\nprintf '%s\\n' \"$MUX_TEST_VALUE\"\nfalse"
+        command = (
+            "MUX_TEST_VALUE='hello world'\nprintf '%s\\n' \"$MUX_TEST_VALUE\"\nfalse"
+        )
         output, code = session.exec(command, 6)
         self.assertEqual((output, code), ("hello world\n", 1))
         output, code = session.exec('printf "%s\\n" "$MUX_TEST_VALUE"', 6)

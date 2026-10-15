@@ -16,7 +16,7 @@ wsl --install -d Ubuntu --no-launch
 wsl -u root -- bash -c 'apt-get update && apt-get install -y openssh-client sshpass'
 ```
 
-启动器检查 `python3` 和 `ssh`，不再要求 `scp`。`push`、`pull` 默认仍使用 `scp`；无此工具时需显式指定 `--transport auto` 等新方式，`--transport` 选项与 Linux 相同。
+启动器要求 `python3` 和 `ssh`，不检查 `scp`。`push`、`pull` 默认使用 `scp`；没有 `scp` 时需显式指定 `--transport auto` 等方式，`--transport` 选项与 Linux 相同。
 
 ## 调用方式
 
@@ -33,4 +33,13 @@ wsl -u root -- bash -c 'apt-get update && apt-get install -y openssh-client sshp
 ssh-mux.bat exec db "hostname && uptime"
 ```
 
-远程路径原样传递；本地相对路径基于当前目录解析，当前目录在网络路径上时请改用绝对路径。配置文件保存在 `WSL` 内的默认路径（`~/.config/ssh-mux/hosts.conf`），无需设置环境变量。在 `Windows` 侧设置的环境变量（如 `SSH_MUX_CONFIG`）不会自动传入 `WSL`，需要经 `WSLENV`（`Windows` 与 `WSL` 之间转发环境变量的机制）转发后才生效；脚本在 `WSL` 内运行，一般无需设置这些变量。脚本所在目录、`exec --file` 及 `push`/`pull` 的本地文件参数不支持 `//` 开头的网络共享路径（即 `Windows` 的 `UNC` 路径，形如 `\\服务器\共享名`，在 `WSL` 中显示为 `//服务器/共享名`）。使用这类路径时脚本会直接报错，请改用本地路径。长连接和守护进程运行在 `WSL` 内，空闲超时和断开行为与 Linux 一致。
+远程路径原样传递；本地相对路径基于当前目录解析，当前目录在网络路径上时请改用绝对路径。配置文件保存在 `WSL` 内的默认路径（`~/.config/ssh-mux/hosts.conf`），无需设置环境变量。在 `Windows` 侧设置的环境变量（如 `SSH_MUX_CONFIG`、`SSH_MUX_PROXY`）不会自动传入 `WSL`，需要经 `WSLENV`（`Windows` 与 `WSL` 之间转发环境变量的机制）转发后才生效；脚本在 `WSL` 内运行，一般无需设置这些变量。脚本所在目录、`exec --file` 及 `push`/`pull` 的本地文件参数不支持 `//` 开头的网络共享路径（即 `Windows` 的 `UNC` 路径，形如 `\\服务器\共享名`，在 `WSL` 中显示为 `//服务器/共享名`）。使用这类路径时脚本会直接报错，请改用本地路径。长连接和守护进程运行在 `WSL` 内，空闲超时和断开行为与 Linux 一致。
+
+## 代理与回环地址
+
+逐段代理的配置字段和优先级见[主机与连接配置](connections.md#逐段代理)。在 `WSL` 内运行时，注意两类执行位置的区别：
+
+- 本机握手程序运行在 `WSL` 内。`SSH_MUX_PROXY` 或首段代理填 `127.0.0.1` 时，指向 `WSL` 虚拟机自身，不是 `Windows` 宿主机的代理。要访问宿主机上的代理，请填写宿主机在 `WSL` 网络中的地址。
+- 跳板段和远端段的代理由该段起点访问，地址相对起点解析。这些段上的 `127.0.0.1` 指向起点主机自身。
+
+远端终端段需要在起点主机运行 Python 代理程序（Python 3.4 或更新版本）；本机段和标准跳板段只使用本机的 Python，跳板无需安装。

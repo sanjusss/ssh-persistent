@@ -19,3 +19,6 @@ ssh-mux-[0-9]*/
 # 桌面系统生成的文件
 .DS_Store
 Thumbs.db
+
+.agents/
+openspec/
