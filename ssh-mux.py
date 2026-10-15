@@ -434,7 +434,7 @@ def shell_hops(chain):
             if h.via:
                 die(f"[{h.alias}] `routing=username` 的堡垒机不支持再配置 `via`")
             if i == len(chain) - 1:
-                die(f"目标主机 [{h.alias}] 不能配置 `routing`")
+                die(f"用户名路由堡垒机 [{h.alias}] 不提供独立终端，不能作为操作目标")
             continue
         if h.routing:
             die(f"[{h.alias}] `routing` 只支持 `username`")
@@ -2181,6 +2181,10 @@ def cmd_host_remove(alias):
 
 def cmd_exit(cp, alias, session):
     h = check_alias(cp, alias)
+    if h.routing == "username":
+        # 用户名路由堡垒机不提供独立终端；连接随各目标主机的会话建立，无需单独断开
+        print(f"跳过: {alias}(用户名路由堡垒机，不提供独立终端)")
+        return
     if host_mode(h) == "jump":
         if jump_exit(cp, h):
             print(f"已断开: {alias}")

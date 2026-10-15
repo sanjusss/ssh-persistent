@@ -2,6 +2,7 @@
 
 import configparser
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -143,6 +144,25 @@ class IsolatedRuntimeTest(unittest.TestCase):
             if call[0][2].get("cmd") == "stop"
         ]
         self.assertEqual(stopped, [("a", "default")])
+
+    def test_exit_routing_bastion_is_skipped(self):
+        # `exit --all` 会遍历到用户名路由堡垒机；它不提供独立终端，应跳过而不是报错
+        cp = configparser.ConfigParser(interpolation=None)
+        cp.read_dict(
+            {
+                "bastion": {"host": "b.invalid", "routing": "username"},
+                "a": {"host": "a.invalid", "via": "bastion", "via_mode": "shell"},
+            }
+        )
+        with (
+            mock.patch.object(mux, "jump_exit") as jump_exit,
+            mock.patch.object(mux, "rpc") as rpc,
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            mux.cmd_exit(cp, "bastion", None)
+        jump_exit.assert_not_called()
+        rpc.assert_not_called()
+        self.assertIn("跳过", out.getvalue())
 
     def test_stale_pid_never_signals_unrelated_process(self):
         Path(mux.shell_sock("a", "default")).touch()
